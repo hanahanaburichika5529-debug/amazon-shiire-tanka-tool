@@ -1,0 +1,348 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>仕入れ単価 自動計算ツール｜Amazon物販FBA</title>
+<link rel="icon" href="data:,">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="app-header">
+  <div class="app-header__inner">
+    <div class="app-header__title">
+      <span class="app-header__logo">📦</span>
+      <div>
+        <h1>仕入れ単価 自動計算ツール</h1>
+        <p>Amazon物販FBA 納品代行サポート</p>
+      </div>
+    </div>
+  </div>
+</header>
+
+<main class="layout">
+
+  <!-- ============ 入力エリア ============ -->
+  <section class="panel panel--form" aria-label="入力">
+
+    <div class="card mode-card">
+      <div class="mode-toggle" role="radiogroup" aria-label="計算モード">
+        <label class="mode-toggle__option">
+          <input type="radio" name="mode" value="reverse" id="mode-reverse" checked>
+          <span>
+            <strong>① 仕入れ単価を計算する</strong>
+            <small>目標利益率・ROIから逆算（このツールの本来機能）</small>
+          </span>
+        </label>
+        <label class="mode-toggle__option">
+          <input type="radio" name="mode" value="forward" id="mode-forward">
+          <span>
+            <strong>② 利益を計算する</strong>
+            <small>すでに決まっている仕入れ単価から順算</small>
+          </span>
+        </label>
+      </div>
+    </div>
+
+    <div class="card import-card">
+      <h2>Amazonの購入通知から仕入れ情報を取り込む</h2>
+      <div class="import-tabs" role="tablist">
+        <button type="button" class="import-tab is-active" data-tab="gmail" role="tab">Gmailと連携して自動取得</button>
+        <button type="button" class="import-tab" data-tab="paste" role="tab">メール本文を貼り付け</button>
+      </div>
+
+      <div class="import-panel" data-panel="gmail">
+        <p id="fileProtocolWarning" class="warning-item is-error" hidden>
+          このページを二重クリックなどでそのまま開いている場合、Googleの認証はブロックされます。GitHub Pagesなど http/https 経由で開いてください（詳しくは README.md）。「メール本文を貼り付け」タブは今のままでも使えます。
+        </p>
+        <p class="hint">Amazonの購入通知メールをGmailから検索し、商品名・数量・金額を読み取ります。読み取り専用でメールの中身は変更しません。「記録に保存」を使うと、専用のGoogleスプレッドシート（このツールが自動作成）に仕入れ記録が保存され、スマホ・PCどちらからも同じ記録を見られます。初回のみGoogleアカウントとの連携設定が必要です。</p>
+        <details class="setup-details">
+          <summary>初回設定の手順（Google Cloud ConsoleでのOAuth設定・所要5分程度）</summary>
+          <ol>
+            <li><a href="https://console.cloud.google.com/" target="_blank" rel="noopener">Google Cloud Console</a>で新しいプロジェクトを作成します。</li>
+            <li>「APIとサービス」→「ライブラリ」で <strong>Gmail API</strong>・<strong>Google Sheets API</strong>・<strong>Google Drive API</strong> を検索し、それぞれ有効にします。</li>
+            <li>「APIとサービス」→「OAuth同意画面」で「外部」を選び、アプリ名と自分のメールアドレスを入力します。公開ステータスは<strong>「テスト」のまま</strong>でOK。「テストユーザー」に自分のGmailアドレスを追加してください。</li>
+            <li>スコープに <code>https://www.googleapis.com/auth/gmail.readonly</code>（メール読み取り専用）と <code>https://www.googleapis.com/auth/drive.file</code>（このツールが作成したファイルのみ）の2つを追加します。</li>
+            <li>「認証情報」→「認証情報を作成」→「OAuthクライアントID」で、アプリケーションの種類は<strong>「ウェブアプリケーション」</strong>を選択します。</li>
+            <li>「承認済みのJavaScript生成元」に、このツールを開くURL（例：<code>https://あなたのユーザー名.github.io</code>）を追加します。スマホから使う場合も同じURLを使うので、追加設定は不要です。</li>
+            <li>作成された「クライアントID」をコピーし、下の欄に貼り付けます。</li>
+          </ol>
+        </details>
+        <div id="gmailNotConnected">
+          <div class="field-grid">
+            <label class="field">
+              <span>Google OAuth クライアントID</span>
+              <input type="text" id="googleClientId" placeholder="xxxxxxxx.apps.googleusercontent.com">
+            </label>
+            <label class="field">
+              <span>Gmail検索クエリ（変更可）</span>
+              <input type="text" id="gmailQuery" value="from:auto-confirm@amazon.co.jp">
+            </label>
+          </div>
+          <button type="button" id="gmailConnectBtn" class="btn btn--primary">Googleと連携する（Gmail検索＋仕入れ記録の保存）</button>
+          <p id="gmailStatus" class="hint"></p>
+        </div>
+        <div id="gmailConnected" hidden>
+          <button type="button" id="gmailFetchBtn" class="btn btn--primary">最新の注文確認メールを検索</button>
+          <button type="button" id="gmailDisconnectBtn" class="btn">連携を解除</button>
+          <div id="gmailMessageList"></div>
+        </div>
+      </div>
+
+      <div class="import-panel" data-panel="paste" hidden>
+        <p class="hint">Amazonから届いた注文確認メールの本文をそのままコピー＆ペーストしてください（住所・支払い情報などが含まれていても取り込みには使用しません）。</p>
+        <textarea id="pasteEmailText" rows="8" placeholder="メール本文をここに貼り付け"></textarea>
+        <button type="button" id="parsePasteBtn" class="btn btn--primary">解析する</button>
+      </div>
+
+      <div id="importReview" hidden>
+        <h3>読み取り結果（内容を確認・修正してから反映・保存してください）</h3>
+        <label class="field" style="max-width:220px;margin-bottom:10px;">
+          <span>仕入れ日（記録に保存する日付）</span>
+          <input type="date" id="importDate">
+        </label>
+        <div class="table-scroll">
+          <table class="import-table" id="importTable"></table>
+        </div>
+        <p class="hint" id="importMeta"></p>
+        <button type="button" id="saveAllRowsBtn" class="btn">表示されている商品をすべて記録に保存</button>
+      </div>
+    </div>
+
+    <div class="card" id="periodCard">
+      <h2>仕入れ記録の期間集計</h2>
+      <p class="hint">「記録に保存」した仕入れデータを、期間を指定して商品（ASIN）ごとに加重平均単価で集計します。期間を指定しなければ通算（開始からすべて）の平均になります。</p>
+      <div class="period-presets">
+        <button type="button" class="btn" data-preset="thisMonth">今月</button>
+        <button type="button" class="btn" data-preset="lastMonth">先月</button>
+        <button type="button" class="btn" data-preset="all">全期間（通算）</button>
+      </div>
+      <div class="field-grid">
+        <label class="field">
+          <span>開始日</span>
+          <input type="date" id="periodFrom">
+        </label>
+        <label class="field">
+          <span>終了日</span>
+          <input type="date" id="periodTo">
+        </label>
+      </div>
+      <button type="button" id="periodCalcBtn" class="btn btn--primary">この期間で集計する</button>
+      <button type="button" id="periodRefreshBtn" class="btn">記録を最新の状態に更新</button>
+      <p class="hint" id="periodStatus"></p>
+      <div class="table-scroll">
+        <table class="import-table" id="periodTable" hidden></table>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>商品情報</h2>
+      <div class="field-grid">
+        <label class="field">
+          <span>商品名（任意）</span>
+          <input type="text" id="productName" placeholder="例）HG ガンダム〇〇 1/144">
+        </label>
+        <label class="field">
+          <span>ASIN（任意）</span>
+          <input type="text" id="asin" placeholder="例）B0XXXXXXXX">
+        </label>
+        <label class="field">
+          <span>カテゴリー</span>
+          <select id="category"></select>
+        </label>
+        <label class="field">
+          <span>販売価格（税込・1個あたり）<em>必須</em></span>
+          <input type="number" id="sellPrice" min="0" step="1" placeholder="例）3980" inputmode="numeric">
+        </label>
+        <label class="field">
+          <span>消費税率</span>
+          <select id="taxRate">
+            <option value="0.10">10%（標準）</option>
+            <option value="0.08">8%（軽減税率・食品等）</option>
+          </select>
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>Amazon手数料・FBA手数料</h2>
+      <div class="field-grid">
+        <label class="field">
+          <span>Amazon販売手数料率（%）</span>
+          <input type="number" id="referralRate" min="0" step="0.1">
+        </label>
+        <label class="field">
+          <span>カテゴリー成約料（¥・メディア商品のみ）</span>
+          <input type="number" id="closingFee" min="0" step="1" value="0">
+        </label>
+        <label class="field">
+          <span>FBAサイズ区分（目安）</span>
+          <select id="fbaSizeTier"></select>
+        </label>
+        <label class="field">
+          <span>FBA配送代行手数料（¥）</span>
+          <input type="number" id="fbaFee" min="0" step="1">
+        </label>
+        <label class="field">
+          <span>月間保管手数料 按分（¥・任意）</span>
+          <input type="number" id="storageFee" min="0" step="1" value="0">
+        </label>
+        <label class="field">
+          <span>広告費 ACoS（%・任意）</span>
+          <input type="number" id="acos" min="0" step="0.1" value="0">
+        </label>
+        <label class="field">
+          <span>返品率（%）</span>
+          <input type="number" id="returnRate" min="0" step="0.1" value="3">
+        </label>
+      </div>
+      <p class="hint">※ 料率・手数料は目安です。2026年4月にAmazon手数料が改定されています。必ず<strong>Amazonセラーセントラルの料金シミュレーター</strong>で最新値を確認し、上の欄に直接入力してください。</p>
+    </div>
+
+    <div class="card">
+      <h2>仕入れコスト（1個あたり）</h2>
+      <div class="field-grid">
+        <label class="field" id="purchasePriceField">
+          <span id="purchasePriceLabel">仕入れ単価（税込）</span>
+          <input type="number" id="purchasePrice" min="0" step="1">
+        </label>
+        <label class="field field--checkbox">
+          <input type="checkbox" id="purchaseTaxExcluded">
+          <span>上の仕入れ単価は税抜価格である</span>
+        </label>
+        <label class="field">
+          <span>国内・海外送料（¥）</span>
+          <input type="number" id="shippingIn" min="0" step="1" value="0">
+        </label>
+        <label class="field">
+          <span>関税・輸入消費税（¥）</span>
+          <input type="number" id="customs" min="0" step="1" value="0">
+        </label>
+        <label class="field">
+          <span>検品・梱包費（¥）</span>
+          <input type="number" id="inspection" min="0" step="1" value="0">
+        </label>
+        <label class="field">
+          <span>FBA納品送料（倉庫までの配送費・¥）</span>
+          <input type="number" id="fbaShip" min="0" step="1" value="0">
+        </label>
+        <label class="field">
+          <span>その他経費（梱包材・付属品等・¥）</span>
+          <input type="number" id="otherCost" min="0" step="1" value="0">
+        </label>
+      </div>
+    </div>
+
+    <div class="card" id="targetCard">
+      <h2>目標設定</h2>
+      <div class="target-type" role="radiogroup" aria-label="逆算の基準">
+        <label><input type="radio" name="targetType" value="margin" id="target-margin" checked> 目標利益率で計算</label>
+        <label><input type="radio" name="targetType" value="roi" id="target-roi"> 目標ROIで計算</label>
+      </div>
+      <div class="field-grid">
+        <label class="field">
+          <span>目標純利益率（%）</span>
+          <input type="number" id="targetMarginPct" min="0" step="1" value="20">
+        </label>
+        <label class="field">
+          <span>目標ROI（%）</span>
+          <input type="number" id="targetRoiPct" min="0" step="1" value="30">
+        </label>
+      </div>
+    </div>
+
+    <div class="card">
+      <h2>数量・資金計画（任意）</h2>
+      <div class="field-grid">
+        <label class="field">
+          <span>月間販売予定数（個）</span>
+          <input type="number" id="monthlyUnits" min="0" step="1" value="0">
+        </label>
+        <label class="field">
+          <span>仕入れリードタイム（日）</span>
+          <input type="number" id="leadTimeDays" min="0" step="1" value="14">
+        </label>
+        <label class="field">
+          <span>Amazon入金サイクル（日）</span>
+          <input type="number" id="paymentCycleDays" min="0" step="1" value="14">
+        </label>
+      </div>
+    </div>
+
+  </section>
+
+  <!-- ============ 結果エリア ============ -->
+  <section class="panel panel--result" aria-label="計算結果">
+
+    <div class="card result-card" id="resultHeadline">
+      <div class="result-headline" id="headlineContent">
+        <p class="result-headline__label">販売価格を入力してください</p>
+      </div>
+    </div>
+
+    <div class="card" id="metricsCard" hidden>
+      <h2>収益性指標</h2>
+      <div class="metrics-grid" id="metricsGrid"></div>
+      <div id="warningList" class="warning-list"></div>
+    </div>
+
+    <div class="card" id="breakdownCard" hidden>
+      <h2>コスト内訳</h2>
+      <div class="breakdown-columns">
+        <div>
+          <h3>仕入れコスト内訳</h3>
+          <table class="breakdown-table" id="purchaseBreakdownTable"></table>
+        </div>
+        <div>
+          <h3>販売時のコスト内訳</h3>
+          <table class="breakdown-table" id="sellingBreakdownTable"></table>
+        </div>
+      </div>
+    </div>
+
+    <div class="card" id="monthlyCard" hidden>
+      <h2>月次・資金計画シミュレーション</h2>
+      <div class="metrics-grid" id="monthlyGrid"></div>
+    </div>
+
+    <div class="card">
+      <div class="assumptions-head">
+        <h2>前提条件・計算の考え方</h2>
+      </div>
+      <ul class="assumptions" id="assumptionsList"></ul>
+    </div>
+
+    <div class="card history-card">
+      <div class="history-head">
+        <h2>計算履歴</h2>
+        <div class="history-actions">
+          <button type="button" id="saveHistoryBtn" class="btn btn--primary">この結果を保存</button>
+          <button type="button" id="exportCsvBtn" class="btn">CSVで書き出す</button>
+        </div>
+      </div>
+      <div id="historyEmpty" class="hint">保存された履歴はまだありません。</div>
+      <table class="history-table" id="historyTable" hidden>
+        <thead>
+          <tr>
+            <th>保存日時</th>
+            <th>商品名</th>
+            <th>モード</th>
+            <th>結果</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody id="historyTableBody"></tbody>
+      </table>
+    </div>
+
+  </section>
+</main>
+
+<footer class="app-footer">
+  <p>本ツールの手数料デフォルト値は概算です。実際の出品・請求金額はAmazonセラーセントラルの表示を正としてください。</p>
+</footer>
+
+<script src="https://accounts.google.com/gsi/client" async defer></script>
+<script src="script.js"></script>
+</body>
+</html>
