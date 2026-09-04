@@ -875,8 +875,14 @@ async function googleFetch(url, options = {}) {
  * あくまで参考表示であり、最終判断はユーザーに委ねる。
  */
 function classifySubject(subject) {
-  if (/キャンセル|取消|返品|返金/.test(subject)) return { tag: "warn", label: "⚠ キャンセル/返品の可能性" };
-  if (/発送|配送|出荷|配達|お届け(済|完了)?|届きました|shipped|delivered/i.test(subject)) return { tag: "safe", label: "✓ 発送/配達済み" };
+  // 「発送できるように情報を更新してください」等、支払い失敗・保留系の件名は
+  // "発送"という文字を含むため、先に判定しないと後段の安全判定に誤って一致してしまう。
+  if (/キャンセル|取消|返品|返金|否認|支払いに失敗|決済に失敗|支払い方法の更新/.test(subject)) {
+    return { tag: "warn", label: "⚠ キャンセル/支払い問題の可能性" };
+  }
+  if (/発送(済み|しました|されました|完了)|出荷(済み|しました|完了)|配送中|配達(済み|完了)|お届け(済み|完了)|届きました|shipped|delivered/i.test(subject)) {
+    return { tag: "safe", label: "✓ 発送/配達済み" };
+  }
   return { tag: "neutral", label: "注文確認など" };
 }
 
