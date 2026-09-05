@@ -530,7 +530,16 @@ function extractAsinsInOrder(rawInput) {
  */
 function parseAmazonOrderEmail(rawInput) {
   const looksHtml = /<[a-z][\s\S]*>/i.test(rawInput);
-  const text = looksHtml ? stripHtml(rawInput) : rawInput;
+  let text = looksHtml ? stripHtml(rawInput) : rawInput;
+
+  // 「もう一度買う」等のおすすめ商品欄は注文内容と無関係な商品・価格を大量に
+  // 含むため、そこから先(フッター含む)は解析対象から除外する。
+  const recommendationCutoffRe = /もう一度買う|おすすめ商品|よく一緒に購入されている商品|この商品を買った人はこんな商品も買っています/;
+  const cutoffMatch = text.match(recommendationCutoffRe);
+  if (cutoffMatch) {
+    text = text.slice(0, cutoffMatch.index);
+  }
+
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
 
   const priceRe = /[¥￥]\s?([\d,]{2,})/;
