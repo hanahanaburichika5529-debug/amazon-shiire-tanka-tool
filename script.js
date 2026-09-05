@@ -956,6 +956,12 @@ function b64urlDecodeUtf8(data) {
   return new TextDecoder("utf-8").decode(bytes);
 }
 
+/**
+ * Amazonの通知メールは「装飾されたHTML版」に商品情報が入っている一方、
+ * 同梱される「シンプルなテキスト版」は署名・規約リンクなどの定型文だけで
+ * 商品情報を含まないことが多い。plainを優先すると読み取れなくなるため、
+ * HTML版があれば常にそちらを優先する。
+ */
 function extractBodyText(payload) {
   let plain = null;
   let html = null;
@@ -966,7 +972,7 @@ function extractBodyText(payload) {
     (part.parts || []).forEach(walk);
   };
   walk(payload);
-  return plain || html || "";
+  return html || plain || "";
 }
 
 async function gmailParseMessage(id) {
