@@ -914,12 +914,9 @@ function googleConnect(forceAccountPicker) {
 /**
  * Gmail/Sheets/Drive共通のfetchラッパー。アクセストークンは1時間程度で
  * 失効するため、401時は状態をクリアして再連携を促す（cryptic なエラーで
- * 止まらせない）。
- */
-/**
- * tokenOverrideを渡すと、現在選択中のアカウント以外(期間集計での複数
- * アカウント横断読み込みなど)のトークンで呼び出せる。省略時は現在選択中の
- * アカウントのトークンを使う。
+ * 止まらせない）。tokenOverrideを渡すと、現在選択中のアカウント以外
+ * (期間集計での複数アカウント横断読み込みなど)のトークンで呼び出せる。
+ * 省略時は現在選択中のアカウントのトークンを使う。
  */
 async function googleFetch(url, options = {}, tokenOverride) {
   const token = tokenOverride || googleAccessToken;
