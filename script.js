@@ -757,6 +757,7 @@ function attachImportEvents() {
   $("gmailFetchBtn").addEventListener("click", gmailFetchOrders);
   $("gmailDisconnectBtn").addEventListener("click", () => {
     delete connectedAccounts[currentAccountEmail];
+    forgetAccount(currentAccountEmail);
     const remaining = Object.keys(connectedAccounts);
     if (remaining.length > 0) {
       currentAccountEmail = remaining[0];
@@ -865,6 +866,78 @@ function renderAccountSwitcher() {
 }
 
 /**
+ * 連携済みアカウントのメールアドレス一覧(トークンそのものではない)だけを
+ * ローカルに覚えておき、次回このページを開いたときに自動的な再連携(サイレント
+ * トークン取得)を試みるために使う。メールアドレス自体は本人のGmail上に
+ * 常に表示されている情報であり、機密情報ではない。
+ */
+const REMEMBERED_ACCOUNTS_KEY = "ppcalc_rememberedAccounts";
+function getRememberedAccounts() {
+  try { return JSON.parse(localStorage.getItem(REMEMBERED_ACCOUNTS_KEY)) || []; } catch (e) { return []; }
+}
+function rememberAccount(email) {
+  const list = getRememberedAccounts();
+  if (!list.includes(email)) {
+    list.push(email);
+    localStorage.setItem(REMEMBERED_ACCOUNTS_KEY, JSON.stringify(list));
+  }
+}
+function forgetAccount(email) {
+  const list = getRememberedAccounts().filter((e) => e !== email);
+  localStorage.setItem(REMEMBERED_ACCOUNTS_KEY, JSON.stringify(list));
+}
+
+let pendingTokenResolve = null;
+let pendingTokenReject = null;
+
+/**
+ * トークンクライアントは1つを使い回し、requestAccessTokenの呼び出しごとに
+ * Promiseで結果を受け取れるようにする(通常のクリック連携・自動サイレント
+ * 再連携のどちらからも同じ仕組みで呼べるようにするため)。1回のリクエストが
+ * 完了してから次を呼ぶ限り、コールバックの取り違えは起きない。
+ */
+function ensureTokenClient(clientId) {
+  if (googleTokenClient) return;
+  googleTokenClient = google.accounts.oauth2.initTokenClient({
+    client_id: clientId,
+    scope: GOOGLE_SCOPES,
+    callback: (resp) => {
+      const resolve = pendingTokenResolve, reject = pendingTokenReject;
+      pendingTokenResolve = null;
+      pendingTokenReject = null;
+      if (!resolve) return;
+      if (resp.error) reject(new Error(resp.error));
+      else resolve(resp.access_token);
+    },
+    error_callback: (err) => {
+      const reject = pendingTokenReject;
+      pendingTokenResolve = null;
+      pendingTokenReject = null;
+      if (reject) reject(new Error((err && err.type) || "認証エラー"));
+    },
+  });
+}
+
+function requestToken(overrideConfig) {
+  return new Promise((resolve, reject) => {
+    pendingTokenResolve = resolve;
+    pendingTokenReject = reject;
+    googleTokenClient.requestAccessToken(overrideConfig || {});
+  });
+}
+
+async function registerConnectedAccount(token, opts = {}) {
+  const email = await fetchAccountEmail(token);
+  connectedAccounts[email] = token;
+  rememberAccount(email);
+  if (!opts.keepCurrent || !currentAccountEmail) {
+    googleAccessToken = token;
+    currentAccountEmail = email;
+  }
+  return email;
+}
+
+/**
  * forceAccountPicker=true で呼ぶと、既に連携済みでもGoogleのアカウント選択
  * 画面を強制的に出す(複数アカウントを1つずつ追加していくため)。トークン
  * クライアント自体は使い回し、初回のみ生成する。
@@ -875,40 +948,61 @@ function googleConnect(forceAccountPicker) {
   localStorage.setItem(CLIENT_ID_KEY, clientId);
 
   $("gmailStatus").textContent = "Googleの認証画面を準備しています…";
-  ensureGisLoaded(() => {
+  ensureGisLoaded(async () => {
     try {
-      if (!googleTokenClient) {
-        googleTokenClient = google.accounts.oauth2.initTokenClient({
-          client_id: clientId,
-          scope: GOOGLE_SCOPES,
-          callback: async (resp) => {
-            if (resp.error) {
-              $("gmailStatus").textContent = "連携に失敗しました: " + resp.error;
-              return;
-            }
-            try {
-              const email = await fetchAccountEmail(resp.access_token);
-              connectedAccounts[email] = resp.access_token;
-              googleAccessToken = resp.access_token;
-              currentAccountEmail = email;
-              $("gmailStatus").textContent = "";
-              $("gmailNotConnected").hidden = true;
-              $("gmailConnected").hidden = false;
-              renderAccountSwitcher();
-              gmailFetchOrders();
-            } catch (e) {
-              $("gmailStatus").textContent = "アカウント情報の取得に失敗しました: " + e.message;
-            }
-          },
-        });
-      }
-      googleTokenClient.requestAccessToken(forceAccountPicker ? { prompt: "select_account" } : {});
+      ensureTokenClient(clientId);
+      const token = await requestToken(forceAccountPicker ? { prompt: "select_account" } : {});
+      await registerConnectedAccount(token);
+      $("gmailStatus").textContent = "";
+      $("gmailNotConnected").hidden = true;
+      $("gmailConnected").hidden = false;
+      renderAccountSwitcher();
+      gmailFetchOrders();
     } catch (e) {
-      $("gmailStatus").textContent = "クライアントIDが正しくない可能性があります: " + e.message;
+      $("gmailStatus").textContent = "連携に失敗しました: " + e.message;
     }
   }, () => {
     $("gmailStatus").textContent = "Googleの認証ライブラリを読み込めませんでした。http/https経由でこのページを開いているかご確認ください。";
   });
+}
+
+/**
+ * ページを開いた直後に、前回までに連携したことのある全アカウントへ、
+ * ポップアップなしのサイレント再認証を順番に試みる。ブラウザがそのGoogle
+ * アカウントにログイン済みで、かつ以前このアプリに権限を許可済みであれば
+ * 無言で成功する。ログアウトされていたり権限が失効している等の場合は
+ * 静かに失敗し、そのアカウントだけ手動再連携が必要な状態のままになる
+ * (「+ 別のアカウントを追加」からいつでもやり直せる)。
+ */
+async function attemptSilentReconnectAll() {
+  const clientId = $("googleClientId").value.trim();
+  const remembered = getRememberedAccounts();
+  if (!clientId || remembered.length === 0) return;
+
+  ensureGisLoaded(async () => {
+    ensureTokenClient(clientId);
+    let successCount = 0;
+    for (let i = 0; i < remembered.length; i++) {
+      $("gmailStatus").textContent = `前回連携したアカウントに自動で再接続しています…（${i + 1}/${remembered.length}）`;
+      try {
+        const token = await requestToken({ prompt: "", hint: remembered[i] });
+        await registerConnectedAccount(token, { keepCurrent: successCount > 0 });
+        successCount++;
+      } catch (e) {
+        // このアカウントはブラウザ側でログアウトされている等、サイレント再連携できない。
+        // 手動での再連携(+ 別のアカウントを追加)が必要な状態のままにして次へ進む。
+      }
+    }
+    if (successCount > 0) {
+      $("gmailNotConnected").hidden = true;
+      $("gmailConnected").hidden = false;
+      renderAccountSwitcher();
+      $("gmailStatus").textContent = `${successCount}/${remembered.length} アカウントに自動再接続しました。`;
+      gmailFetchOrders();
+    } else {
+      $("gmailStatus").textContent = "";
+    }
+  }, () => { /* GISが読み込めない場合は自動再接続を諦め、手動連携ボタンに委ねる */ });
 }
 
 /**
@@ -1351,6 +1445,10 @@ function init() {
   attachImportEvents();
   renderHistory();
   recalcAndRender();
+
+  if (location.protocol !== "file:") {
+    attemptSilentReconnectAll();
+  }
 }
 
 document.addEventListener("DOMContentLoaded", init);
