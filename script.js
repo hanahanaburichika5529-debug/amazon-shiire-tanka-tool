@@ -489,7 +489,9 @@ function attachHistoryEvents() {
 
 const CLIENT_ID_KEY = "ppcalc_googleClientId";
 const GOOGLE_SCOPES = "https://www.googleapis.com/auth/gmail.readonly https://www.googleapis.com/auth/drive.file";
-let googleAccessToken = null;
+let googleAccessToken = null; // 現在選択中のアカウントのトークン(Gmail検索・解析・保存の対象)
+let currentAccountEmail = null;
+const connectedAccounts = {}; // { email: accessToken } このページを開いている間、連携済みの全アカウントを保持
 let googleTokenClient = null;
 let currentParsedItems = [];
 let currentParsedOrderNumber = "";
@@ -751,14 +753,35 @@ function attachImportEvents() {
   const savedClientId = localStorage.getItem(CLIENT_ID_KEY);
   if (savedClientId) $("googleClientId").value = savedClientId;
 
-  $("gmailConnectBtn").addEventListener("click", googleConnect);
+  $("gmailConnectBtn").addEventListener("click", () => googleConnect(false));
   $("gmailFetchBtn").addEventListener("click", gmailFetchOrders);
   $("gmailDisconnectBtn").addEventListener("click", () => {
-    googleAccessToken = null;
-    $("gmailConnected").hidden = true;
-    $("gmailNotConnected").hidden = false;
-    $("gmailMessageList").innerHTML = "";
-    $("gmailStatus").textContent = "連携を解除しました。";
+    delete connectedAccounts[currentAccountEmail];
+    const remaining = Object.keys(connectedAccounts);
+    if (remaining.length > 0) {
+      currentAccountEmail = remaining[0];
+      googleAccessToken = connectedAccounts[currentAccountEmail];
+      renderAccountSwitcher();
+      gmailFetchOrders();
+    } else {
+      googleAccessToken = null;
+      currentAccountEmail = null;
+      $("gmailConnected").hidden = true;
+      $("gmailNotConnected").hidden = false;
+      $("gmailMessageList").innerHTML = "";
+      $("gmailStatus").textContent = "連携を解除しました。";
+    }
+  });
+  $("accountSwitcher").addEventListener("click", (e) => {
+    const addBtn = e.target.closest('button[data-action="add-account"]');
+    if (addBtn) { googleConnect(true); return; }
+    const chip = e.target.closest('button[data-action="switch-account"]');
+    if (chip) {
+      currentAccountEmail = chip.dataset.email;
+      googleAccessToken = connectedAccounts[currentAccountEmail];
+      renderAccountSwitcher();
+      gmailFetchOrders();
+    }
   });
 
   $("parsePasteBtn").addEventListener("click", () => {
@@ -825,7 +848,28 @@ function ensureGisLoaded(cb, onTimeout) {
   }, 200);
 }
 
-function googleConnect() {
+async function fetchAccountEmail(token) {
+  const res = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/profile", {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error((json.error && json.error.message) || "アカウント情報の取得に失敗しました");
+  return json.emailAddress;
+}
+
+function renderAccountSwitcher() {
+  const emails = Object.keys(connectedAccounts);
+  $("accountSwitcher").innerHTML = emails.map((email) => `
+    <button type="button" class="btn account-chip${email === currentAccountEmail ? " is-active" : ""}" data-action="switch-account" data-email="${escapeHtml(email)}">${email === currentAccountEmail ? "✓ " : ""}${escapeHtml(email)}</button>
+  `).join("") + `<button type="button" class="btn account-chip" data-action="add-account">+ 別のアカウントを追加</button>`;
+}
+
+/**
+ * forceAccountPicker=true で呼ぶと、既に連携済みでもGoogleのアカウント選択
+ * 画面を強制的に出す(複数アカウントを1つずつ追加していくため)。トークン
+ * クライアント自体は使い回し、初回のみ生成する。
+ */
+function googleConnect(forceAccountPicker) {
   const clientId = $("googleClientId").value.trim();
   if (!clientId) { alert("Google OAuth クライアントIDを入力してください。上の「初回設定の手順」を参照してください。"); return; }
   localStorage.setItem(CLIENT_ID_KEY, clientId);
@@ -833,22 +877,32 @@ function googleConnect() {
   $("gmailStatus").textContent = "Googleの認証画面を準備しています…";
   ensureGisLoaded(() => {
     try {
-      googleTokenClient = google.accounts.oauth2.initTokenClient({
-        client_id: clientId,
-        scope: GOOGLE_SCOPES,
-        callback: (resp) => {
-          if (resp.error) {
-            $("gmailStatus").textContent = "連携に失敗しました: " + resp.error;
-            return;
-          }
-          googleAccessToken = resp.access_token;
-          $("gmailStatus").textContent = "";
-          $("gmailNotConnected").hidden = true;
-          $("gmailConnected").hidden = false;
-          gmailFetchOrders();
-        },
-      });
-      googleTokenClient.requestAccessToken();
+      if (!googleTokenClient) {
+        googleTokenClient = google.accounts.oauth2.initTokenClient({
+          client_id: clientId,
+          scope: GOOGLE_SCOPES,
+          callback: async (resp) => {
+            if (resp.error) {
+              $("gmailStatus").textContent = "連携に失敗しました: " + resp.error;
+              return;
+            }
+            try {
+              const email = await fetchAccountEmail(resp.access_token);
+              connectedAccounts[email] = resp.access_token;
+              googleAccessToken = resp.access_token;
+              currentAccountEmail = email;
+              $("gmailStatus").textContent = "";
+              $("gmailNotConnected").hidden = true;
+              $("gmailConnected").hidden = false;
+              renderAccountSwitcher();
+              gmailFetchOrders();
+            } catch (e) {
+              $("gmailStatus").textContent = "アカウント情報の取得に失敗しました: " + e.message;
+            }
+          },
+        });
+      }
+      googleTokenClient.requestAccessToken(forceAccountPicker ? { prompt: "select_account" } : {});
     } catch (e) {
       $("gmailStatus").textContent = "クライアントIDが正しくない可能性があります: " + e.message;
     }
@@ -862,16 +916,24 @@ function googleConnect() {
  * 失効するため、401時は状態をクリアして再連携を促す（cryptic なエラーで
  * 止まらせない）。
  */
-async function googleFetch(url, options = {}) {
+/**
+ * tokenOverrideを渡すと、現在選択中のアカウント以外(期間集計での複数
+ * アカウント横断読み込みなど)のトークンで呼び出せる。省略時は現在選択中の
+ * アカウントのトークンを使う。
+ */
+async function googleFetch(url, options = {}, tokenOverride) {
+  const token = tokenOverride || googleAccessToken;
   const res = await fetch(url, {
     ...options,
-    headers: { ...(options.headers || {}), Authorization: `Bearer ${googleAccessToken}` },
+    headers: { ...(options.headers || {}), Authorization: `Bearer ${token}` },
   });
   if (res.status === 401) {
-    googleAccessToken = null;
-    $("gmailConnected").hidden = true;
-    $("gmailNotConnected").hidden = false;
-    $("gmailStatus").textContent = "連携の有効期限が切れました。もう一度「Googleと連携する」を押してください。";
+    if (!tokenOverride) {
+      googleAccessToken = null;
+      $("gmailConnected").hidden = true;
+      $("gmailNotConnected").hidden = false;
+      $("gmailStatus").textContent = "連携の有効期限が切れました。もう一度「Googleと連携する」を押してください。";
+    }
     throw new Error("認証の有効期限が切れました。再連携してください。");
   }
   return res;
@@ -998,27 +1060,31 @@ const SHEET_TITLE = "仕入れ単価計算ツール_仕入れ記録";
 const SHEET_TAB = "仕入れ記録";
 const SHEET_HEADER = ["日付", "商品名", "ASIN", "数量", "単価", "金額", "取得元", "注文番号"];
 
-let cachedRecords = null;
+const cachedRecordsByEmail = {}; // { email: records[] } アカウントごとに別のスプレッドシートを持つため
 let currentPeriodGroups = [];
 
 /**
- * 専用スプレッドシートのIDをローカルにキャッシュし、次回以降は検索を省略する。
- * キャッシュが無効（削除された等）な場合は名前検索→無ければ新規作成、の順にフォールバックする。
+ * 専用スプレッドシートのIDをアカウント(email)ごとにローカルキャッシュし、
+ * 次回以降は検索を省略する。各Googleアカウントは自分のDrive内のファイルしか
+ * 見えない(drive.fileスコープ)ため、スプレッドシートもアカウントごとに別々になる。
+ * キャッシュが無効（削除された等）な場合は名前検索→無ければ新規作成、の順に
+ * フォールバックする。
  */
-async function ensurePurchaseSheet() {
-  let sheetId = localStorage.getItem(SHEET_ID_KEY);
+async function ensurePurchaseSheet(token, email) {
+  const cacheKey = SHEET_ID_KEY + "_" + email;
+  let sheetId = localStorage.getItem(cacheKey);
   if (sheetId) {
-    const check = await googleFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=spreadsheetId`);
+    const check = await googleFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=spreadsheetId`, {}, token);
     if (check.ok) return sheetId;
-    localStorage.removeItem(SHEET_ID_KEY);
+    localStorage.removeItem(cacheKey);
   }
 
   const q = encodeURIComponent(`name='${SHEET_TITLE}' and trashed=false`);
-  const searchRes = await googleFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`);
+  const searchRes = await googleFetch(`https://www.googleapis.com/drive/v3/files?q=${q}&fields=files(id,name)`, {}, token);
   const searchJson = await searchRes.json();
   if (searchRes.ok && searchJson.files && searchJson.files.length > 0) {
     sheetId = searchJson.files[0].id;
-    localStorage.setItem(SHEET_ID_KEY, sheetId);
+    localStorage.setItem(cacheKey, sheetId);
     return sheetId;
   }
 
@@ -1029,7 +1095,7 @@ async function ensurePurchaseSheet() {
       properties: { title: SHEET_TITLE },
       sheets: [{ properties: { title: SHEET_TAB } }],
     }),
-  });
+  }, token);
   const createJson = await createRes.json();
   if (!createRes.ok) throw new Error((createJson.error && createJson.error.message) || "スプレッドシートの作成に失敗しました");
   sheetId = createJson.spreadsheetId;
@@ -1038,33 +1104,33 @@ async function ensurePurchaseSheet() {
     method: "PUT",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ values: [SHEET_HEADER] }),
-  });
+  }, token);
 
-  localStorage.setItem(SHEET_ID_KEY, sheetId);
+  localStorage.setItem(cacheKey, sheetId);
   return sheetId;
 }
 
-async function appendPurchaseRecord(record) {
-  const sheetId = await ensurePurchaseSheet();
+async function appendPurchaseRecord(record, token, email) {
+  const sheetId = await ensurePurchaseSheet(token, email);
   const row = [record.date, record.name, record.asin || "", record.quantity, record.unitPrice, record.amount, record.source, record.orderNumber || ""];
   const res = await googleFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(SHEET_TAB + "!A:H")}:append?valueInputOption=USER_ENTERED&insertDataOption=INSERT_ROWS`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({ values: [row] }),
-  });
+  }, token);
   const json = await res.json();
   if (!res.ok) throw new Error((json.error && json.error.message) || "保存に失敗しました");
-  cachedRecords = null;
+  delete cachedRecordsByEmail[email];
 }
 
-async function fetchPurchaseRecords(forceRefresh) {
-  if (cachedRecords && !forceRefresh) return cachedRecords;
-  const sheetId = await ensurePurchaseSheet();
-  const res = await googleFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(SHEET_TAB + "!A2:H100000")}`);
+async function fetchPurchaseRecords(token, email, forceRefresh) {
+  if (cachedRecordsByEmail[email] && !forceRefresh) return cachedRecordsByEmail[email];
+  const sheetId = await ensurePurchaseSheet(token, email);
+  const res = await googleFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/${encodeURIComponent(SHEET_TAB + "!A2:H100000")}`, {}, token);
   const json = await res.json();
   if (!res.ok) throw new Error((json.error && json.error.message) || "読み込みに失敗しました");
   const rows = json.values || [];
-  cachedRecords = rows
+  const records = rows
     .map((r) => ({
       date: r[0] || "",
       name: r[1] || "",
@@ -1076,7 +1142,22 @@ async function fetchPurchaseRecords(forceRefresh) {
       orderNumber: r[7] || "",
     }))
     .filter((r) => r.date);
-  return cachedRecords;
+  cachedRecordsByEmail[email] = records;
+  return records;
+}
+
+/**
+ * 期間集計はこの時点で連携済みの全アカウントを横断して行うため、各アカウントの
+ * トークンで、そのアカウント自身のスプレッドシートを個別に読みに行って合算する。
+ */
+async function fetchAllAccountsPurchaseRecords(forceRefresh) {
+  const emails = Object.keys(connectedAccounts);
+  const allRecords = [];
+  for (const email of emails) {
+    const records = await fetchPurchaseRecords(connectedAccounts[email], email, forceRefresh);
+    allRecords.push(...records);
+  }
+  return allRecords;
 }
 
 async function saveRowToRecord(idx, opts = {}) {
@@ -1093,8 +1174,8 @@ async function saveRowToRecord(idx, opts = {}) {
     amount,
     source: "import",
     orderNumber: currentParsedOrderNumber,
-  });
-  if (!opts.silent) alert(`「${item.name}」を仕入れ記録に保存しました。`);
+  }, googleAccessToken, currentAccountEmail);
+  if (!opts.silent) alert(`「${item.name}」を仕入れ記録に保存しました。（${currentAccountEmail}）`);
 }
 
 async function saveAllRowsToRecord() {
@@ -1104,7 +1185,7 @@ async function saveAllRowsToRecord() {
     for (let i = 0; i < currentParsedItems.length; i++) {
       await saveRowToRecord(i, { silent: true });
     }
-    alert(`${currentParsedItems.length}件を仕入れ記録に保存しました。`);
+    alert(`${currentParsedItems.length}件を仕入れ記録に保存しました。（${currentAccountEmail}）`);
   } catch (e) {
     alert("保存中にエラーが発生しました: " + e.message);
   }
@@ -1193,10 +1274,11 @@ function setPeriodPreset(preset) {
 }
 
 async function runPeriodAggregation(forceRefresh) {
-  if (!googleAccessToken) { alert("先に「Googleと連携する」を行ってください。"); return; }
-  $("periodStatus").textContent = "集計中…";
+  const emails = Object.keys(connectedAccounts);
+  if (emails.length === 0) { alert("先に「Googleと連携する」を行ってください。"); return; }
+  $("periodStatus").textContent = `集計中…（連携済み ${emails.length} アカウント分）`;
   try {
-    const records = await fetchPurchaseRecords(forceRefresh);
+    const records = await fetchAllAccountsPurchaseRecords(forceRefresh);
     const groups = aggregateByPeriod(records, $("periodFrom").value, $("periodTo").value);
     renderPeriodResults(groups);
   } catch (e) {

@@ -83,8 +83,10 @@
           <p id="gmailStatus" class="hint"></p>
         </div>
         <div id="gmailConnected" hidden>
-          <button type="button" id="gmailFetchBtn" class="btn btn--primary">最新の注文確認メールを検索</button>
-          <button type="button" id="gmailDisconnectBtn" class="btn">連携を解除</button>
+          <p class="hint">複数のAmazonアカウントをお使いの場合は、下から「+ 別のアカウントを追加」で順番に連携してください。一度連携したアカウントは、このページを開いている間はボタン1つで切り替えられます（再ログイン不要）。</p>
+          <div id="accountSwitcher" class="account-switcher"></div>
+          <button type="button" id="gmailFetchBtn" class="btn btn--primary">選択中のアカウントで最新の注文確認メールを検索</button>
+          <button type="button" id="gmailDisconnectBtn" class="btn">選択中のアカウントの連携を解除</button>
           <div id="gmailMessageList"></div>
         </div>
       </div>
@@ -111,7 +113,7 @@
 
     <div class="card" id="periodCard">
       <h2>仕入れ記録の期間集計</h2>
-      <p class="hint">「記録に保存」した仕入れデータを、期間を指定して商品（ASIN）ごとに加重平均単価で集計します。期間を指定しなければ通算（開始からすべて）の平均になります。</p>
+      <p class="hint">「記録に保存」した仕入れデータを、期間を指定して商品（ASIN）ごとに加重平均単価で集計します。期間を指定しなければ通算（開始からすべて）の平均になります。この時点で連携済みの全アカウント分をまとめて集計します（未連携のアカウント分は含まれません）。</p>
       <div class="period-presets">
         <button type="button" class="btn" data-preset="thisMonth">今月</button>
         <button type="button" class="btn" data-preset="lastMonth">先月</button>

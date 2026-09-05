@@ -280,6 +280,11 @@ body {
 .gmail-msg-badge--warn { background: var(--red-bg); color: var(--red); }
 .gmail-msg-badge--neutral { background: #eee; color: var(--text-muted); }
 
+.account-switcher { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0; }
+.account-chip { border-radius: 999px; font-size: 12px; }
+.account-chip.is-active { background: var(--navy-light); color: #fff; border-color: var(--navy-light); }
+.account-chip[data-action="add-account"] { border-style: dashed; }
+
 .period-presets { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .import-table td.import-actions { display: flex; flex-direction: column; gap: 4px; }
 #periodCard .btn, #importReview .btn { margin-top: 8px; margin-right: 8px; }
