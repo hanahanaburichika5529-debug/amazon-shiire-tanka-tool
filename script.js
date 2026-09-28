@@ -467,7 +467,10 @@ function escapeHtml(str) {
 }
 
 function stripHtml(html) {
-  const withBreaks = html.replace(/<(br|\/p|\/tr|\/div|\/li|\/h[1-6])\s*\/?>/gi, "\n");
+  // 注文情報のテーブル(<td>)はセルごとに商品名/数量/金額が分かれているが、
+  // </td>を改行に変換しないと同じ行につながってしまい、価格の近くの行を
+  // 探す商品名検出がずれてしまう(セル同士は視覚的に別の項目として区切る)。
+  const withBreaks = html.replace(/<(br|\/p|\/tr|\/td|\/th|\/div|\/li|\/h[1-6])\s*\/?>/gi, "\n");
   const noTags = withBreaks.replace(/<[^>]+>/g, " ");
   const ta = document.createElement("textarea");
   ta.innerHTML = noTags;
