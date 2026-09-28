@@ -85,9 +85,6 @@ function readState() {
     targetType: document.querySelector('input[name="targetType"]:checked').value,
     targetMarginPct: num("targetMarginPct", 20),
     targetRoiPct: num("targetRoiPct", 30),
-    monthlyUnits: num("monthlyUnits"),
-    leadTimeDays: num("leadTimeDays", 14),
-    paymentCycleDays: num("paymentCycleDays", 14),
   };
 }
 
@@ -113,9 +110,6 @@ function writeState(s) {
   $("otherCost").value = s.otherCost;
   $("targetMarginPct").value = s.targetMarginPct;
   $("targetRoiPct").value = s.targetRoiPct;
-  $("monthlyUnits").value = s.monthlyUnits;
-  $("leadTimeDays").value = s.leadTimeDays;
-  $("paymentCycleDays").value = s.paymentCycleDays;
   document.querySelector(`input[name="mode"][value="${s.mode}"]`).checked = true;
   document.querySelector(`input[name="targetType"][value="${s.targetType}"]`).checked = true;
 }
@@ -210,14 +204,6 @@ function compute(s) {
     warnings, errors,
   };
 
-  if (s.monthlyUnits > 0) {
-    result.monthly = {
-      monthlyProfit: netProfit * s.monthlyUnits,
-      initialCapital: purchaseCostTotal * s.monthlyUnits,
-      cashCycleDays: s.leadTimeDays + s.paymentCycleDays,
-    };
-  }
-
   return result;
 }
 
@@ -225,7 +211,6 @@ function render(s, result) {
   renderHeadline(s, result);
   renderMetrics(result);
   renderBreakdown(result);
-  renderMonthly(result);
   renderAssumptions(s);
 }
 
@@ -319,27 +304,6 @@ function renderBreakdown(result) {
   ];
   $("sellingBreakdownTable").innerHTML = sellingRows.map(([l, v]) => `<tr><td>${l}</td><td>${v}</td></tr>`).join("")
     + `<tr class="is-total"><td>販売時コスト合計</td><td>${yen(result.sellingCostTotal)}</td></tr>`;
-}
-
-function renderMonthly(result) {
-  const card = $("monthlyCard");
-  if (result.status !== "ok" || !result.monthly) {
-    card.hidden = true;
-    return;
-  }
-  card.hidden = false;
-  const m = result.monthly;
-  const items = [
-    ["月次純利益（見込み）", yen(m.monthlyProfit)],
-    ["必要な仕入れ資金（初期投資額）", yen(m.initialCapital)],
-    ["資金回収までの目安日数", `${m.cashCycleDays} 日`],
-  ];
-  $("monthlyGrid").innerHTML = items.map(([label, value]) => `
-    <div class="metric">
-      <span class="metric__label">${label}</span>
-      <span class="metric__value">${value}</span>
-    </div>
-  `).join("");
 }
 
 function renderAssumptions(s) {
@@ -1397,7 +1361,6 @@ function attachInputEvents() {
     "sellPrice", "taxRate", "referralRate", "closingFee", "fbaFee", "storageFee",
     "acos", "returnRate", "purchasePrice", "purchaseTaxExcluded", "shippingIn",
     "customs", "inspection", "fbaShip", "otherCost", "targetMarginPct", "targetRoiPct",
-    "monthlyUnits", "leadTimeDays", "paymentCycleDays",
   ];
   ids.forEach(id => {
     $(id).addEventListener("input", recalcAndRender);
