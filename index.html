@@ -55,7 +55,7 @@
         <p id="fileProtocolWarning" class="warning-item is-error" hidden>
           このページを二重クリックなどでそのまま開いている場合、Googleの認証はブロックされます。GitHub Pagesなど http/https 経由で開いてください（詳しくは README.md）。「メール本文を貼り付け」タブは今のままでも使えます。
         </p>
-        <p class="hint">Amazonの購入通知メールをGmailから検索し、商品名・数量・金額を読み取ります。読み取り専用でメールの中身は変更しません。「記録に保存」を使うと、専用のGoogleスプレッドシート（このツールが自動作成）に仕入れ記録が保存され、スマホ・PCどちらからも同じ記録を見られます。初回のみGoogleアカウントとの連携設定が必要です。</p>
+        <p class="hint">Amazonの購入通知メールを検索し、商品名・数量・金額を読み取ります（読み取り専用）。「記録に保存」でスマホ・PC共通の仕入れ記録として保存できます。初回のみ下の連携設定が必要です。</p>
         <details class="setup-details">
           <summary>初回設定の手順（Google Cloud ConsoleでのOAuth設定・所要5分程度）</summary>
           <ol>
@@ -83,7 +83,7 @@
           <p id="gmailStatus" class="hint"></p>
         </div>
         <div id="gmailConnected" hidden>
-          <p class="hint">複数のAmazonアカウントをお使いの場合は、下から「+ 別のアカウントを追加」で順番に連携してください。一度連携したアカウントは、次回このページを開いたときも自動で再接続を試みます（お使いのブラウザでそのGoogleアカウントにログインしたままの場合）。</p>
+          <p class="hint">複数アカウントを使う場合は「+ 別のアカウントを追加」で順番に連携してください。一度連携すれば、次回からは自動で再接続します。</p>
           <div id="accountSwitcher" class="account-switcher"></div>
           <button type="button" id="gmailFetchBtn" class="btn btn--primary">選択中のアカウントで最新の注文確認メールを検索</button>
           <button type="button" id="gmailDisconnectBtn" class="btn">選択中のアカウントの連携を解除</button>
@@ -185,20 +185,25 @@
           <span>FBA配送代行手数料（¥）</span>
           <input type="number" id="fbaFee" min="0" step="1">
         </label>
-        <label class="field">
-          <span>月間保管手数料 按分（¥・任意）</span>
-          <input type="number" id="storageFee" min="0" step="1" value="0">
-        </label>
-        <label class="field">
-          <span>広告費 ACoS（%・任意）</span>
-          <input type="number" id="acos" min="0" step="0.1" value="0">
-        </label>
-        <label class="field">
-          <span>返品率（%）</span>
-          <input type="number" id="returnRate" min="0" step="0.1" value="3">
-        </label>
       </div>
-      <p class="hint">※ 料率・手数料は目安です。2026年4月にAmazon手数料が改定されています。必ず<strong>Amazonセラーセントラルの料金シミュレーター</strong>で最新値を確認し、上の欄に直接入力してください。</p>
+      <p class="hint">カテゴリーとFBAサイズ区分を選ぶと自動入力されます。必ず<strong>Amazonセラーセントラルの料金シミュレーター</strong>で最新値を確認してください。</p>
+      <details class="field-details">
+        <summary>広告費・保管手数料・返品率を調整する（任意・初期値のままで計算できます）</summary>
+        <div class="field-grid">
+          <label class="field">
+            <span>月間保管手数料 按分（¥・任意）</span>
+            <input type="number" id="storageFee" min="0" step="1" value="0">
+          </label>
+          <label class="field">
+            <span>広告費 ACoS（%・任意）</span>
+            <input type="number" id="acos" min="0" step="0.1" value="0">
+          </label>
+          <label class="field">
+            <span>返品率（%）</span>
+            <input type="number" id="returnRate" min="0" step="0.1" value="3">
+          </label>
+        </div>
+      </details>
     </div>
 
     <div class="card">
@@ -212,27 +217,32 @@
           <input type="checkbox" id="purchaseTaxExcluded">
           <span>上の仕入れ単価は税抜価格である</span>
         </label>
-        <label class="field">
-          <span>国内・海外送料（¥）</span>
-          <input type="number" id="shippingIn" min="0" step="1" value="0">
-        </label>
-        <label class="field">
-          <span>関税・輸入消費税（¥）</span>
-          <input type="number" id="customs" min="0" step="1" value="0">
-        </label>
-        <label class="field">
-          <span>検品・梱包費（¥）</span>
-          <input type="number" id="inspection" min="0" step="1" value="0">
-        </label>
-        <label class="field">
-          <span>FBA納品送料（倉庫までの配送費・¥）</span>
-          <input type="number" id="fbaShip" min="0" step="1" value="0">
-        </label>
-        <label class="field">
-          <span>その他経費（梱包材・付属品等・¥）</span>
-          <input type="number" id="otherCost" min="0" step="1" value="0">
-        </label>
       </div>
+      <details class="field-details">
+        <summary>送料・関税など付随費用を追加する（任意・未入力なら0円）</summary>
+        <div class="field-grid">
+          <label class="field">
+            <span>国内・海外送料（¥）</span>
+            <input type="number" id="shippingIn" min="0" step="1" value="0">
+          </label>
+          <label class="field">
+            <span>関税・輸入消費税（¥）</span>
+            <input type="number" id="customs" min="0" step="1" value="0">
+          </label>
+          <label class="field">
+            <span>検品・梱包費（¥）</span>
+            <input type="number" id="inspection" min="0" step="1" value="0">
+          </label>
+          <label class="field">
+            <span>FBA納品送料（倉庫までの配送費・¥）</span>
+            <input type="number" id="fbaShip" min="0" step="1" value="0">
+          </label>
+          <label class="field">
+            <span>その他経費（梱包材・付属品等・¥）</span>
+            <input type="number" id="otherCost" min="0" step="1" value="0">
+          </label>
+        </div>
+      </details>
     </div>
 
     <div class="card" id="targetCard">
@@ -254,21 +264,23 @@
     </div>
 
     <div class="card">
-      <h2>数量・資金計画（任意）</h2>
-      <div class="field-grid">
-        <label class="field">
-          <span>月間販売予定数（個）</span>
-          <input type="number" id="monthlyUnits" min="0" step="1" value="0">
-        </label>
-        <label class="field">
-          <span>仕入れリードタイム（日）</span>
-          <input type="number" id="leadTimeDays" min="0" step="1" value="14">
-        </label>
-        <label class="field">
-          <span>Amazon入金サイクル（日）</span>
-          <input type="number" id="paymentCycleDays" min="0" step="1" value="14">
-        </label>
-      </div>
+      <details class="field-details">
+        <summary class="card-summary">数量・資金計画を追加する（任意）</summary>
+        <div class="field-grid">
+          <label class="field">
+            <span>月間販売予定数（個）</span>
+            <input type="number" id="monthlyUnits" min="0" step="1" value="0">
+          </label>
+          <label class="field">
+            <span>仕入れリードタイム（日）</span>
+            <input type="number" id="leadTimeDays" min="0" step="1" value="14">
+          </label>
+          <label class="field">
+            <span>Amazon入金サイクル（日）</span>
+            <input type="number" id="paymentCycleDays" min="0" step="1" value="14">
+          </label>
+        </div>
+      </details>
     </div>
 
   </section>
