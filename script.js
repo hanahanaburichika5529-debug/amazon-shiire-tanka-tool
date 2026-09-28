@@ -493,6 +493,42 @@ function extractAsinsInOrder(rawInput) {
 }
 
 /**
+ * 商品名は「価格に近い行」を探す推定だと、テーブルレイアウト崩れ等で
+ * 誤検出しやすい。Amazonのメールでは商品名が必ず商品ページへのリンク
+ * (<a>タグ)になっているため、そのリンクのテキストを直接使う方が確実。
+ * クリック計測用のリダイレクトURLで飛んでいるとhref内のASINがURL
+ * エンコードされていることがあるため、デコードしてから探す。
+ * 戻り値: { byAsin: Map<ASIN,名前>, all: [{asin, name}] (出現順) }
+ * asinが取れなくても all には残すので、呼び出し側で件数ベースの
+ * フォールバック(商品が1件だけの注文など)に使える。
+ */
+function extractProductLinkNames(rawInput) {
+  const linkRe = /<a\b[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const asinRe = /(?:\/dp\/|\/gp\/product\/|[?&]asin=)([A-Z0-9]{10})/i;
+  const nonProductTextRe = /^(こちら|詳細|詳細を見る|商品を見る|注文履歴|注文の詳細|配送状況|配送状況を確認|レビュー|レビューを書く|返品|再購入|画像)$/;
+  const byAsin = new Map();
+  const all = [];
+  let m;
+  while ((m = linkRe.exec(rawInput)) !== null) {
+    const hrefRaw = m[1];
+    let hrefDecoded = hrefRaw;
+    try { hrefDecoded = decodeURIComponent(hrefRaw); } catch (e) { /* 不正なエンコードはそのまま使う */ }
+    const text = stripHtml(m[2]).replace(/\s+/g, " ").trim();
+    if (text.length < 3 || nonProductTextRe.test(text)) continue;
+
+    const asinMatch = hrefDecoded.match(asinRe) || hrefRaw.match(asinRe);
+    const asin = asinMatch ? asinMatch[1] : null;
+
+    all.push({ asin, name: text });
+    if (asin) {
+      const existing = byAsin.get(asin);
+      if (!existing || text.length > existing.length) byAsin.set(asin, text);
+    }
+  }
+  return { byAsin, all };
+}
+
+/**
  * Amazonのメール書式は改定されうるため厳密な単一パターンには依存せず、
  * 「価格らしき行」と「数量らしき行」を近接ペアリングする緩い方式にしている。
  * 誤読の可能性を前提に、結果は必ず編集可能な形でユーザーに確認してもらう。
@@ -632,6 +668,20 @@ function parseAmazonOrderEmail(rawInput) {
   if (asins.length === items.length) {
     items.forEach((item, idx) => { item.asin = asins[idx]; });
   }
+
+  // 商品ページへのリンクの文字列が取れていれば、行の近さで推定した商品名より
+  // 確実なのでそちらを優先する(テーブルレイアウトの崩れ等で誤った文字列を
+  // 拾ってしまうケースへの対策)。ASINで紐付けられない場合でも、商品が
+  // 1件だけの注文でリンクの候補も1件だけに絞れるなら、それを使う。
+  const { byAsin: linkNamesByAsin, all: linkNameCandidates } = extractProductLinkNames(rawInput);
+  const uniqueLinkNames = Array.from(new Set(linkNameCandidates.map((c) => c.name)));
+  items.forEach((item) => {
+    if (item.asin && linkNamesByAsin.has(item.asin)) {
+      item.name = linkNamesByAsin.get(item.asin);
+    } else if (items.length === 1 && uniqueLinkNames.length === 1) {
+      item.name = uniqueLinkNames[0];
+    }
+  });
 
   const warnings = [];
   if (items.length === 0) warnings.push("金額を検出できませんでした。メール本文の形式をご確認ください。");
