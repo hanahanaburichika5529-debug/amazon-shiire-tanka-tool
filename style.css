@@ -85,10 +85,13 @@ body {
   border: 1px solid var(--border);
   border-radius: var(--radius);
   box-shadow: var(--shadow);
-  padding: 18px 20px;
-  margin-bottom: 16px;
+  padding: 20px 22px;
+  margin-bottom: 18px;
 }
-.card h2 { margin: 0 0 14px; font-size: 15px; color: var(--navy-light); }
+@media (max-width: 480px) {
+  .card { padding: 16px 14px; }
+}
+.card h2 { margin: 0 0 14px; font-size: 16px; font-weight: 700; color: var(--navy-light); }
 .card h3 { margin: 0 0 8px; font-size: 13px; color: var(--text-muted); }
 
 .mode-card { padding: 10px; }
@@ -119,7 +122,7 @@ body {
 }
 @media (max-width: 520px) { .field-grid { grid-template-columns: 1fr; } }
 
-.field { display: flex; flex-direction: column; gap: 5px; font-size: 13px; }
+.field { display: flex; flex-direction: column; gap: 5px; font-size: 13.5px; }
 .field span { color: var(--text-muted); }
 .field em { color: var(--red); font-style: normal; margin-left: 4px; font-size: 11px; }
 .field input[type="number"],
@@ -154,10 +157,10 @@ body {
 }
 .target-type label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
 
-.hint { font-size: 12px; color: var(--text-muted); margin: 10px 0 0; }
+.hint { font-size: 12.5px; color: var(--text-muted); margin: 10px 0 0; }
 
 /* ---- results ---- */
-.result-card { text-align: center; }
+.result-card { text-align: center; padding: 26px 20px; }
 .result-headline__label { font-size: 14px; color: var(--text-muted); margin: 0 0 6px; }
 .result-headline__value {
   font-size: 40px;
@@ -181,8 +184,8 @@ body {
   padding: 10px 12px;
   background: #fafafa;
 }
-.metric__label { font-size: 12px; color: var(--text-muted); display: block; }
-.metric__value { font-size: 18px; font-weight: 700; }
+.metric__label { font-size: 12.5px; color: var(--text-muted); display: block; }
+.metric__value { font-size: 19px; font-weight: 700; }
 .metric__value.is-negative { color: var(--red); }
 .metric__value.is-warning { color: var(--amber); }
 
@@ -221,10 +224,11 @@ body {
 .btn {
   border: 1px solid var(--border);
   background: #fff;
-  padding: 7px 14px;
+  padding: 9px 16px;
   border-radius: 6px;
-  font-size: 12.5px;
+  font-size: 13px;
   cursor: pointer;
+  min-height: 38px;
 }
 .btn:hover { background: #f3f3f3; }
 .btn--primary { background: var(--orange); border-color: var(--orange-dark); color: #111; font-weight: 700; }
@@ -270,6 +274,23 @@ body {
   font-size: 11.5px;
   word-break: break-all;
 }
+
+/* あまり触らない項目(送料・関税、広告費、資金計画など)を折りたたんで
+   画面の情報量を減らし、必須項目を見つけやすくするための共通スタイル。 */
+.field-details { margin-top: 14px; }
+.field-details summary {
+  cursor: pointer;
+  color: var(--navy-light);
+  font-weight: 600;
+  font-size: 13px;
+  list-style: none;
+  padding: 6px 0;
+}
+.field-details summary::-webkit-details-marker { display: none; }
+.field-details summary::before { content: "▸ "; color: var(--orange-dark); }
+.field-details[open] summary::before { content: "▾ "; }
+.field-details summary.card-summary { font-size: 16px; font-weight: 700; }
+.field-details .field-grid { margin-top: 12px; }
 
 .gmail-msg-row { display: flex; align-items: center; gap: 12px; margin-top: 8px; padding: 6px 0; border-bottom: 1px solid var(--border); }
 .gmail-msg-row .btn { flex-shrink: 0; }
