@@ -308,6 +308,10 @@ body {
 
 .period-presets { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
 .period-presets .btn.is-active { background: var(--navy-light); color: #fff; border-color: var(--navy-light); }
+
+.period-breakdown-row > td { background: var(--bg); padding: 10px !important; }
+.breakdown-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.breakdown-table th, .breakdown-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: left; }
 .import-table td.import-actions { display: flex; flex-direction: column; gap: 4px; }
 #periodCard .btn, #importReview .btn { margin-top: 8px; margin-right: 8px; }
 

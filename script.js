@@ -1247,6 +1247,46 @@ async function appendPurchaseRecord(record, token, email) {
   delete cachedRecordsByEmail[email];
 }
 
+/**
+ * 行の物理削除(deleteDimension)には、スプレッドシートID文字列ではなく
+ * シート自体の内部的な数値ID(gid)が必要なため別途取得する。
+ */
+async function getSheetGid(spreadsheetId, token) {
+  const res = await googleFetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}?fields=sheets.properties`, {}, token);
+  const json = await res.json();
+  if (!res.ok) throw new Error((json.error && json.error.message) || "シート情報の取得に失敗しました");
+  const sheets = json.sheets || [];
+  const target = sheets.find((s) => s.properties.title === SHEET_TAB) || sheets[0];
+  if (!target) throw new Error("シートが見つかりませんでした");
+  return target.properties.sheetId;
+}
+
+/**
+ * 指定した記録(rowNumberで特定した1行)をスプレッドシートから完全に削除する。
+ * 行を消すと後続行が1つずつ上に詰まるため、呼び出し側は削除後に必ず
+ * fetchPurchaseRecordsをforceRefreshで呼び直し、古いrowNumberを使い回さないこと。
+ */
+async function deletePurchaseRecord(record) {
+  const token = connectedAccounts[record.email];
+  if (!token) throw new Error(`${record.email} は連携済みではありません`);
+  const spreadsheetId = await ensurePurchaseSheet(token, record.email);
+  const gid = await getSheetGid(spreadsheetId, token);
+  const res = await googleFetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      requests: [{
+        deleteDimension: {
+          range: { sheetId: gid, dimension: "ROWS", startIndex: record.rowNumber - 1, endIndex: record.rowNumber },
+        },
+      }],
+    }),
+  }, token);
+  const json = await res.json();
+  if (!res.ok) throw new Error((json.error && json.error.message) || "削除に失敗しました");
+  delete cachedRecordsByEmail[record.email];
+}
+
 async function fetchPurchaseRecords(token, email, forceRefresh) {
   if (cachedRecordsByEmail[email] && !forceRefresh) return cachedRecordsByEmail[email];
   const sheetId = await ensurePurchaseSheet(token, email);
@@ -1255,7 +1295,7 @@ async function fetchPurchaseRecords(token, email, forceRefresh) {
   if (!res.ok) throw new Error((json.error && json.error.message) || "読み込みに失敗しました");
   const rows = json.values || [];
   const records = rows
-    .map((r) => ({
+    .map((r, idx) => ({
       date: r[0] || "",
       name: r[1] || "",
       asin: r[2] || "",
@@ -1264,6 +1304,8 @@ async function fetchPurchaseRecords(token, email, forceRefresh) {
       amount: parseFloat(r[5]) || 0,
       source: r[6] || "",
       orderNumber: r[7] || "",
+      email, // どのアカウントのスプレッドシートの記録かを覚えておき、削除時にトークンを引けるようにする
+      rowNumber: idx + 2, // シート上の実際の行番号(A2から始まるため+2)。削除(行の物理削除)に必要。
     }))
     .filter((r) => r.date);
   cachedRecordsByEmail[email] = records;
@@ -1334,10 +1376,11 @@ function aggregateByPeriod(records, fromStr, toStr) {
   const groups = new Map();
   filtered.forEach((r) => {
     const key = r.asin || r.name;
-    if (!groups.has(key)) groups.set(key, { name: r.name, asin: r.asin, quantity: 0, amount: 0 });
+    if (!groups.has(key)) groups.set(key, { name: r.name, asin: r.asin, quantity: 0, amount: 0, records: [] });
     const g = groups.get(key);
     g.quantity += r.quantity;
     g.amount += r.amount;
+    g.records.push(r);
     if (!g.asin && r.asin) g.asin = r.asin;
   });
 
@@ -1364,7 +1407,26 @@ function renderPeriodResults(groups) {
         <td>${g.quantity}</td>
         <td>${yen(g.amount)}</td>
         <td><strong>${yen(g.weightedAvgPrice)}</strong></td>
-        <td><button type="button" class="btn btn--primary" data-action="use-period-avg" data-idx="${idx}">計算ツールへ反映</button></td>
+        <td>
+          <button type="button" class="btn" data-action="toggle-breakdown" data-idx="${idx}">内訳（${g.records.length}件）</button>
+          <button type="button" class="btn btn--primary" data-action="use-period-avg" data-idx="${idx}">計算ツールへ反映</button>
+        </td>
+      </tr>
+      <tr class="period-breakdown-row" data-group-idx="${idx}" hidden>
+        <td colspan="5">
+          <table class="breakdown-table">
+            <thead><tr><th>日付</th><th>数量</th><th>金額</th><th>アカウント／注文番号</th><th></th></tr></thead>
+            <tbody>${g.records.map((r, rIdx) => `
+              <tr>
+                <td>${escapeHtml(r.date)}</td>
+                <td>${r.quantity}</td>
+                <td>${yen(r.amount)}</td>
+                <td>${escapeHtml(r.email)}${r.orderNumber ? `<br><small>${escapeHtml(r.orderNumber)}</small>` : ""}</td>
+                <td><button type="button" class="btn btn--danger" data-action="delete-record" data-group-idx="${idx}" data-record-idx="${rIdx}">削除</button></td>
+              </tr>
+            `).join("")}</tbody>
+          </table>
+        </td>
       </tr>
     `).join("")}</tbody>
   `;
@@ -1424,10 +1486,33 @@ function attachPeriodEvents() {
   });
   $("periodCalcBtn").addEventListener("click", () => runPeriodAggregation(false));
   $("periodRefreshBtn").addEventListener("click", () => runPeriodAggregation(true));
-  $("periodTable").addEventListener("click", (e) => {
-    const btn = e.target.closest('button[data-action="use-period-avg"]');
-    if (!btn) return;
-    usePeriodAverage(parseInt(btn.dataset.idx, 10));
+  $("periodTable").addEventListener("click", async (e) => {
+    const useBtn = e.target.closest('button[data-action="use-period-avg"]');
+    if (useBtn) { usePeriodAverage(parseInt(useBtn.dataset.idx, 10)); return; }
+
+    const toggleBtn = e.target.closest('button[data-action="toggle-breakdown"]');
+    if (toggleBtn) {
+      const row = $("periodTable").querySelector(`tr.period-breakdown-row[data-group-idx="${toggleBtn.dataset.idx}"]`);
+      if (row) row.hidden = !row.hidden;
+      return;
+    }
+
+    const deleteBtn = e.target.closest('button[data-action="delete-record"]');
+    if (deleteBtn) {
+      const group = currentPeriodGroups[parseInt(deleteBtn.dataset.groupIdx, 10)];
+      const record = group && group.records[parseInt(deleteBtn.dataset.recordIdx, 10)];
+      if (!record) return;
+      if (!confirm(`この記録を削除しますか？\n${record.date} / ${record.name} / ${yen(record.amount)}\n（元に戻せません）`)) return;
+      deleteBtn.disabled = true;
+      try {
+        await deletePurchaseRecord(record);
+        // 行削除で後続行の番号がずれるため、キャッシュを使わず必ず再取得してから再描画する。
+        await runPeriodAggregation(true);
+      } catch (err) {
+        alert("削除に失敗しました: " + err.message);
+        deleteBtn.disabled = false;
+      }
+    }
   });
 }
 
