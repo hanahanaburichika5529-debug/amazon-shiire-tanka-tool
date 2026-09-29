@@ -50,22 +50,20 @@
           </ol>
         </details>
         <div id="gmailNotConnected">
-          <div class="field-grid">
-            <label class="field">
-              <span>Google OAuth クライアントID</span>
-              <input type="text" id="googleClientId" placeholder="xxxxxxxx.apps.googleusercontent.com">
-            </label>
-            <label class="field">
-              <span>Gmail検索クエリ（変更可）</span>
-              <input type="text" id="gmailQuery" value="from:amazon.co.jp 発送">
-            </label>
-          </div>
+          <label class="field" style="margin-bottom:10px;">
+            <span>Google OAuth クライアントID</span>
+            <input type="text" id="googleClientId" placeholder="xxxxxxxx.apps.googleusercontent.com">
+          </label>
           <button type="button" id="gmailConnectBtn" class="btn btn--primary">Googleと連携する</button>
           <p id="gmailStatus" class="hint"></p>
         </div>
         <div id="gmailConnected" hidden>
           <p class="hint">複数アカウントは「+ 別のアカウントを追加」で連携してください。次回からは自動で再接続します。</p>
           <div id="accountSwitcher" class="account-switcher"></div>
+          <label class="field" style="max-width:320px;margin-bottom:10px;">
+            <span>Gmail検索クエリ（変更可）</span>
+            <input type="text" id="gmailQuery" value="from:amazon.co.jp 発送">
+          </label>
           <button type="button" id="gmailFetchBtn" class="btn btn--primary">選択中のアカウントで検索</button>
           <button type="button" id="gmailDisconnectBtn" class="btn">連携を解除</button>
           <div id="gmailMessageList"></div>
