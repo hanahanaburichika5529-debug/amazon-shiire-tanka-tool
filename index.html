@@ -64,6 +64,15 @@
             <span>Gmail検索クエリ（変更可）</span>
             <input type="text" id="gmailQuery" value="from:amazon.co.jp 発送">
           </label>
+
+          <div style="background:var(--bg);border-radius:8px;padding:12px;margin-bottom:14px;">
+            <button type="button" id="bulkFetchBtn" class="btn btn--primary">検索条件に一致する全メールを自動取得・保存</button>
+            <p class="hint">1件ずつ手動で解析しなくても、条件に一致するメールをまとめて取得し、キャンセル等を除いて商品情報を自動で記録に保存します。前回までに処理済みのメールはスキップされます（重複保存の防止）。</p>
+            <p id="bulkStatus" class="hint"></p>
+            <div id="bulkHistory"></div>
+          </div>
+
+          <p class="hint">1件ずつ内容を確認しながら取り込みたい場合は、以下で個別に検索・解析してください（最新20件まで表示）。</p>
           <button type="button" id="gmailFetchBtn" class="btn btn--primary">選択中のアカウントで検索</button>
           <button type="button" id="openSheetBtn" class="btn">選択中のアカウントのスプレッドシートを開く</button>
           <button type="button" id="gmailDisconnectBtn" class="btn">連携を解除</button>

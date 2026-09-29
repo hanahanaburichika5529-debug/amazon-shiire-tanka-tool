@@ -775,6 +775,7 @@ function attachImportEvents() {
 
   $("gmailConnectBtn").addEventListener("click", () => googleConnect(false));
   $("gmailFetchBtn").addEventListener("click", gmailFetchOrders);
+  $("bulkFetchBtn").addEventListener("click", runBulkFetch);
   $("openSheetBtn").addEventListener("click", async () => {
     if (!googleAccessToken) { alert("先に「Googleと連携する」を行ってください。"); return; }
     // ポップアップブロック対策として、非同期処理の前に空のタブを同期的に開いておき、
@@ -803,6 +804,7 @@ function attachImportEvents() {
       $("gmailConnected").hidden = true;
       $("gmailNotConnected").hidden = false;
       $("gmailMessageList").innerHTML = "";
+      $("bulkHistory").innerHTML = "";
       $("gmailStatus").textContent = "連携を解除しました。";
     }
   });
@@ -896,6 +898,7 @@ function renderAccountSwitcher() {
   $("accountSwitcher").innerHTML = emails.map((email) => `
     <button type="button" class="btn account-chip${email === currentAccountEmail ? " is-active" : ""}" data-action="switch-account" data-email="${escapeHtml(email)}">${email === currentAccountEmail ? "✓ " : ""}${escapeHtml(email)}</button>
   `).join("") + `<button type="button" class="btn account-chip" data-action="add-account">+ 別のアカウントを追加</button>`;
+  renderBulkHistory(currentAccountEmail);
 }
 
 /**
@@ -1245,6 +1248,176 @@ async function appendPurchaseRecord(record, token, email) {
   const json = await res.json();
   if (!res.ok) throw new Error((json.error && json.error.message) || "保存に失敗しました");
   delete cachedRecordsByEmail[email];
+}
+
+/* ---------------- 一括取得・保存 ---------------- */
+
+const BULK_MAX_MESSAGES = 200; // 1回の実行での上限(API負荷・実行時間の暴走防止)
+const BULK_BATCH_SIZE = 8; // 同時に処理するメール件数
+const BULK_PROCESSED_IDS_KEY = "ppcalc_bulkProcessedIds";
+const BULK_RUN_HISTORY_KEY = "ppcalc_bulkRunHistory";
+const BULK_HISTORY_LIMIT = 10;
+
+function getBulkProcessedIds(email) {
+  try { return JSON.parse(localStorage.getItem(BULK_PROCESSED_IDS_KEY + "_" + email)) || []; } catch (e) { return []; }
+}
+function addBulkProcessedIds(email, ids) {
+  const set = new Set(getBulkProcessedIds(email));
+  ids.forEach((id) => set.add(id));
+  localStorage.setItem(BULK_PROCESSED_IDS_KEY + "_" + email, JSON.stringify(Array.from(set)));
+}
+
+function getBulkRunHistory(email) {
+  try { return JSON.parse(localStorage.getItem(BULK_RUN_HISTORY_KEY + "_" + email)) || []; } catch (e) { return []; }
+}
+function addBulkRunHistory(email, entry) {
+  const list = getBulkRunHistory(email);
+  list.unshift(entry);
+  localStorage.setItem(BULK_RUN_HISTORY_KEY + "_" + email, JSON.stringify(list.slice(0, BULK_HISTORY_LIMIT)));
+}
+
+function renderBulkHistory(email) {
+  const el = $("bulkHistory");
+  if (!el) return;
+  const list = email ? getBulkRunHistory(email) : [];
+  if (list.length === 0) { el.innerHTML = ""; return; }
+  el.innerHTML = `
+    <table class="import-table" style="margin-top:10px;">
+      <thead><tr><th>実行日時</th><th>対象期間</th><th>新規確認</th><th>保存</th><th>スキップ</th></tr></thead>
+      <tbody>${list.map((h) => `
+        <tr>
+          <td>${new Date(h.ranAt).toLocaleString("ja-JP")}</td>
+          <td>${h.fromDate && h.toDate ? `${h.fromDate} 〜 ${h.toDate}` : "（該当なし）"}</td>
+          <td>${h.newMessages}件</td>
+          <td>${h.savedItems}件</td>
+          <td>${h.skipped}件</td>
+        </tr>
+      `).join("")}</tbody>
+    </table>
+  `;
+}
+
+/**
+ * Gmailのmessages.listはmaxResults=100/回が上限のため、nextPageTokenで
+ * ページングしてBULK_MAX_MESSAGES件まで集める。
+ */
+async function listAllMessageIds(query, token, maxTotal) {
+  const ids = [];
+  let pageToken = "";
+  do {
+    const url = `https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=100&q=${encodeURIComponent(query)}${pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : ""}`;
+    const res = await googleFetch(url, {}, token);
+    const json = await res.json();
+    if (!res.ok) throw new Error((json.error && json.error.message) || "検索に失敗しました");
+    ids.push(...(json.messages || []).map((m) => m.id));
+    pageToken = json.nextPageToken || "";
+  } while (pageToken && ids.length < maxTotal);
+  return ids.slice(0, maxTotal);
+}
+
+/**
+ * 1件のメールを取得・分類・解析し、キャンセル等でなければ商品ごとに
+ * 記録へ保存する。件名が「キャンセル/支払い問題の可能性」に分類される
+ * ものは、実際の購入が成立していない可能性が高いため保存しない。
+ */
+async function processSingleMessageForBulk(id, token, email) {
+  const res = await googleFetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=full`, {}, token);
+  const json = await res.json();
+  if (!res.ok) return { id, skipped: true };
+
+  const headers = (json.payload && json.payload.headers) || [];
+  const subject = (headers.find((h) => h.name === "Subject") || {}).value || "";
+  const dateMs = json.internalDate ? parseInt(json.internalDate, 10) : null;
+  const dateStr = dateMs ? new Date(dateMs).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
+
+  if (classifySubject(subject).tag === "warn") return { id, skipped: true, dateMs };
+
+  const text = extractBodyText(json.payload);
+  const parsed = parseAmazonOrderEmail(text);
+  if (parsed.items.length === 0) return { id, skipped: true, dateMs };
+
+  for (const item of parsed.items) {
+    const unitPrice = item.isUnitPrice ? item.price : item.price / (item.quantity || 1);
+    const amount = item.isUnitPrice ? item.price * item.quantity : item.price;
+    await appendPurchaseRecord({
+      date: dateStr,
+      name: item.name,
+      asin: item.asin || "",
+      quantity: item.quantity,
+      unitPrice,
+      amount,
+      source: "bulk",
+      orderNumber: parsed.orderNumber || "",
+    }, token, email);
+  }
+  return { id, skipped: false, savedCount: parsed.items.length, dateMs };
+}
+
+/**
+ * 検索条件に一致する全メールを取得し、未処理のものだけをまとめて解析・保存する。
+ * どのメールを処理済みとしたかはアカウントごとにローカルへ記録し、次回以降は
+ * 同じメールを再取得・重複保存しないようにする。
+ */
+async function runBulkFetch() {
+  if (!googleAccessToken || !currentAccountEmail) { alert("先に「Googleと連携する」を行ってください。"); return; }
+  const token = googleAccessToken;
+  const email = currentAccountEmail;
+  const query = $("gmailQuery").value.trim();
+
+  $("bulkFetchBtn").disabled = true;
+  $("bulkStatus").textContent = "検索中…";
+  try {
+    const allIds = await listAllMessageIds(query, token, BULK_MAX_MESSAGES);
+    const processedBefore = new Set(getBulkProcessedIds(email));
+    const newIds = allIds.filter((id) => !processedBefore.has(id));
+
+    if (newIds.length === 0) {
+      $("bulkStatus").textContent = `検索該当 ${allIds.length}件、うち新規は0件でした（すべて処理済みです）。`;
+      addBulkRunHistory(email, { ranAt: new Date().toISOString(), newMessages: 0, savedItems: 0, skipped: 0, fromDate: null, toDate: null });
+      renderBulkHistory(email);
+      return;
+    }
+
+    let savedItems = 0, skippedCount = 0, doneCount = 0;
+    let minDateMs = null, maxDateMs = null;
+    const processedIds = [];
+
+    for (let i = 0; i < newIds.length; i += BULK_BATCH_SIZE) {
+      const batch = newIds.slice(i, i + BULK_BATCH_SIZE);
+      $("bulkStatus").textContent = `処理中… ${doneCount}/${newIds.length}件`;
+      const results = await Promise.all(batch.map((id) =>
+        processSingleMessageForBulk(id, token, email).catch(() => ({ id, skipped: true }))
+      ));
+      results.forEach((r) => {
+        doneCount++;
+        processedIds.push(r.id);
+        if (r.dateMs) {
+          if (minDateMs === null || r.dateMs < minDateMs) minDateMs = r.dateMs;
+          if (maxDateMs === null || r.dateMs > maxDateMs) maxDateMs = r.dateMs;
+        }
+        if (r.skipped) skippedCount++;
+        else savedItems += r.savedCount;
+      });
+    }
+
+    addBulkProcessedIds(email, processedIds);
+    delete cachedRecordsByEmail[email];
+
+    const fmt = (ms) => (ms ? new Date(ms).toISOString().slice(0, 10) : null);
+    addBulkRunHistory(email, {
+      ranAt: new Date().toISOString(),
+      newMessages: newIds.length,
+      savedItems, skipped: skippedCount,
+      fromDate: fmt(minDateMs), toDate: fmt(maxDateMs),
+    });
+
+    $("bulkStatus").textContent = `完了: 新規${newIds.length}件を確認し、${savedItems}件の商品を記録に保存しました（${skippedCount}件はキャンセル等のためスキップ）。`;
+    renderBulkHistory(email);
+  } catch (e) {
+    $("bulkStatus").textContent = "エラー: " + e.message;
+  } finally {
+    $("bulkFetchBtn").disabled = false;
+  }
 }
 
 /**
