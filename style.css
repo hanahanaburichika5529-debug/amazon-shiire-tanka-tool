@@ -80,6 +80,9 @@ body {
   .panel--result { position: static; }
 }
 
+/* 期間集計は表が横に長いため、2カラムの外に出して画面幅いっぱいに表示する */
+.panel--full { grid-column: 1 / -1; }
+
 .card {
   background: var(--card-bg);
   border: 1px solid var(--border);
@@ -310,8 +313,8 @@ body {
 .period-presets .btn.is-active { background: var(--navy-light); color: #fff; border-color: var(--navy-light); }
 
 .period-breakdown-row > td { background: var(--bg); padding: 10px !important; }
-.breakdown-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-.breakdown-table th, .breakdown-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: left; }
+.record-breakdown-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.record-breakdown-table th, .record-breakdown-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: left; }
 .import-table td.import-actions { display: flex; flex-direction: column; gap: 4px; }
 #periodCard .btn, #importReview .btn { margin-top: 8px; margin-right: 8px; }
 

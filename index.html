@@ -100,32 +100,6 @@
       </div>
     </div>
 
-    <div class="card" id="periodCard">
-      <h2>仕入れ単価の集計結果</h2>
-      <p class="hint">保存した仕入れデータを期間・商品ごとに加重平均単価で集計します。連携済みの全アカウント分をまとめて計算します。</p>
-      <div class="period-presets">
-        <button type="button" class="btn" data-preset="thisMonth">今月</button>
-        <button type="button" class="btn" data-preset="lastMonth">先月</button>
-        <button type="button" class="btn" data-preset="all">全期間（通算）</button>
-      </div>
-      <div class="field-grid">
-        <label class="field">
-          <span>開始日</span>
-          <input type="date" id="periodFrom">
-        </label>
-        <label class="field">
-          <span>終了日</span>
-          <input type="date" id="periodTo">
-        </label>
-      </div>
-      <button type="button" id="periodCalcBtn" class="btn btn--primary">この期間で集計する</button>
-      <button type="button" id="periodRefreshBtn" class="btn">最新の状態に更新</button>
-      <p class="hint" id="periodStatus"></p>
-      <div class="table-scroll">
-        <table class="import-table" id="periodTable" hidden></table>
-      </div>
-    </div>
-
     <div class="card">
       <details class="field-details">
         <summary class="card-summary">利益計算ツールを使う（任意・仕入れ単価の取得には不要）</summary>
@@ -332,6 +306,33 @@
     </div>
 
   </section>
+
+  <!-- ============ 期間集計（横幅いっぱいに表示） ============ -->
+  <div class="card panel--full" id="periodCard">
+    <h2>仕入れ単価の集計結果</h2>
+    <p class="hint">保存した仕入れデータを期間・商品ごとに加重平均単価で集計します。連携済みの全アカウント分をまとめて計算します。</p>
+    <div class="period-presets">
+      <button type="button" class="btn" data-preset="thisMonth">今月</button>
+      <button type="button" class="btn" data-preset="lastMonth">先月</button>
+      <button type="button" class="btn" data-preset="all">全期間（通算）</button>
+    </div>
+    <div class="field-grid">
+      <label class="field">
+        <span>開始日</span>
+        <input type="date" id="periodFrom">
+      </label>
+      <label class="field">
+        <span>終了日</span>
+        <input type="date" id="periodTo">
+      </label>
+    </div>
+    <button type="button" id="periodCalcBtn" class="btn btn--primary">この期間で集計する</button>
+    <button type="button" id="periodRefreshBtn" class="btn">最新の状態に更新</button>
+    <p class="hint" id="periodStatus"></p>
+    <div class="table-scroll">
+      <table class="import-table" id="periodTable" hidden></table>
+    </div>
+  </div>
 </main>
 
 <footer class="app-footer">

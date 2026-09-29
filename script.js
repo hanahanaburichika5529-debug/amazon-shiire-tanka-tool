@@ -1587,7 +1587,7 @@ function renderPeriodResults(groups) {
       </tr>
       <tr class="period-breakdown-row" data-group-idx="${idx}" hidden>
         <td colspan="5">
-          <table class="breakdown-table">
+          <table class="record-breakdown-table">
             <thead><tr><th>日付</th><th>数量</th><th>金額</th><th>アカウント／注文番号</th><th></th></tr></thead>
             <tbody>${g.records.map((r, rIdx) => `
               <tr>
