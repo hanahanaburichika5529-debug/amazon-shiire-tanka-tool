@@ -1382,7 +1382,7 @@ function usePeriodAverage(idx) {
   window.scrollTo({ top: 0, behavior: "smooth" });
 }
 
-function setPeriodPreset(preset) {
+function setPeriodPreset(preset, btn) {
   const now = new Date();
   const fmt = (d) => d.toISOString().slice(0, 10);
   if (preset === "all") {
@@ -1395,6 +1395,7 @@ function setPeriodPreset(preset) {
     $("periodFrom").value = fmt(new Date(now.getFullYear(), now.getMonth() - 1, 1));
     $("periodTo").value = fmt(new Date(now.getFullYear(), now.getMonth(), 0));
   }
+  document.querySelectorAll(".period-presets .btn").forEach((b) => b.classList.toggle("is-active", b === btn));
 }
 
 async function runPeriodAggregation(forceRefresh) {
@@ -1412,7 +1413,14 @@ async function runPeriodAggregation(forceRefresh) {
 
 function attachPeriodEvents() {
   document.querySelectorAll(".period-presets .btn").forEach((btn) => {
-    btn.addEventListener("click", () => setPeriodPreset(btn.dataset.preset));
+    btn.addEventListener("click", () => setPeriodPreset(btn.dataset.preset, btn));
+  });
+  // プリセットボタン経由でなく開始日・終了日を直接書き換えた場合は、
+  // どのプリセットとも一致しなくなるため選択表示を外す。
+  [$("periodFrom"), $("periodTo")].forEach((el) => {
+    el.addEventListener("input", () => {
+      document.querySelectorAll(".period-presets .btn").forEach((b) => b.classList.remove("is-active"));
+    });
   });
   $("periodCalcBtn").addEventListener("click", () => runPeriodAggregation(false));
   $("periodRefreshBtn").addEventListener("click", () => runPeriodAggregation(true));

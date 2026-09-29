@@ -307,6 +307,7 @@ body {
 .account-chip[data-action="add-account"] { border-style: dashed; }
 
 .period-presets { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 12px; }
+.period-presets .btn.is-active { background: var(--navy-light); color: #fff; border-color: var(--navy-light); }
 .import-table td.import-actions { display: flex; flex-direction: column; gap: 4px; }
 #periodCard .btn, #importReview .btn { margin-top: 8px; margin-right: 8px; }
 
