@@ -775,6 +775,19 @@ function attachImportEvents() {
 
   $("gmailConnectBtn").addEventListener("click", () => googleConnect(false));
   $("gmailFetchBtn").addEventListener("click", gmailFetchOrders);
+  $("openSheetBtn").addEventListener("click", async () => {
+    if (!googleAccessToken) { alert("先に「Googleと連携する」を行ってください。"); return; }
+    // ポップアップブロック対策として、非同期処理の前に空のタブを同期的に開いておき、
+    // シートIDが分かった時点でその遷移先を差し替える。
+    const win = window.open("", "_blank");
+    try {
+      const sheetId = await ensurePurchaseSheet(googleAccessToken, currentAccountEmail);
+      if (win) win.location.href = `https://docs.google.com/spreadsheets/d/${sheetId}/edit`;
+    } catch (e) {
+      if (win) win.close();
+      alert("スプレッドシートを開けませんでした: " + e.message);
+    }
+  });
   $("gmailDisconnectBtn").addEventListener("click", () => {
     delete connectedAccounts[currentAccountEmail];
     forgetAccount(currentAccountEmail);
