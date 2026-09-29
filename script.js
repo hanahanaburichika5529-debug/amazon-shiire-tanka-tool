@@ -505,7 +505,7 @@ function extractAsinsInOrder(rawInput) {
 function extractProductLinkNames(rawInput) {
   const linkRe = /<a\b[^>]*href="([^"]*)"[^>]*>([\s\S]*?)<\/a>/gi;
   const asinRe = /(?:\/dp\/|\/gp\/product\/|[?&]asin=)([A-Z0-9]{10})/i;
-  const nonProductTextRe = /^(こちら|詳細|詳細を見る|商品を見る|注文履歴|注文の詳細|配送状況|配送状況を確認|レビュー|レビューを書く|返品|再購入|画像)$/;
+  const nonProductTextRe = /^(こちら|詳細|詳細を見る|商品を見る|注文履歴|注文の詳細|配送状況|配送状況を確認|レビュー|レビューを書く|返品|再購入|画像|アカウントサービス|Amazon\.co\.jp)$/i;
   const byAsin = new Map();
   const all = [];
   let m;
@@ -534,16 +534,19 @@ function extractProductLinkNames(rawInput) {
  * 誤読の可能性を前提に、結果は必ず編集可能な形でユーザーに確認してもらう。
  */
 function parseAmazonOrderEmail(rawInput) {
-  const looksHtml = /<[a-z][\s\S]*>/i.test(rawInput);
-  let text = looksHtml ? stripHtml(rawInput) : rawInput;
-
-  // 「もう一度買う」等のおすすめ商品欄は注文内容と無関係な商品・価格を大量に
-  // 含むため、そこから先(フッター含む)は解析対象から除外する。
+  // 「もう一度買う」等のおすすめ商品欄は注文内容と無関係な商品・価格・リンクを
+  // 大量に含むため、そこから先(フッター含む)は元のHTMLの時点で切り詰め、
+  // 本文の行ベース解析だけでなくASIN・商品リンクの抽出にも一貫して効かせる。
   const recommendationCutoffRe = /もう一度買う|おすすめ商品|よく一緒に購入されている商品|この商品を買った人はこんな商品も買っています/;
-  const cutoffMatch = text.match(recommendationCutoffRe);
-  if (cutoffMatch) {
-    text = text.slice(0, cutoffMatch.index);
-  }
+  const cutoffMatch = rawInput.match(recommendationCutoffRe);
+  const scopedInput = cutoffMatch ? rawInput.slice(0, cutoffMatch.index) : rawInput;
+
+  const looksHtml = /<[a-z][\s\S]*>/i.test(scopedInput);
+  let text = looksHtml ? stripHtml(scopedInput) : scopedInput;
+  // 注文番号等の直前にAmazonが挿入する双方向テキスト制御用の不可視文字
+  // (RLM/LRMや埋め込み記号等)が、数字の直前にあると正規表現の連続一致を
+  // 妨げるため、見た目に影響しないこれらの文字を除去しておく。
+  text = text.replace(/[​-‏‪-‮⁦-⁩﻿]/g, "");
 
   const lines = text.split(/\r?\n/).map((l) => l.trim()).filter((l) => l.length > 0);
 
@@ -664,7 +667,7 @@ function parseAmazonOrderEmail(rawInput) {
     asin: "",
   }));
 
-  const asins = extractAsinsInOrder(rawInput);
+  const asins = extractAsinsInOrder(scopedInput);
   if (asins.length === items.length) {
     items.forEach((item, idx) => { item.asin = asins[idx]; });
   }
@@ -673,7 +676,7 @@ function parseAmazonOrderEmail(rawInput) {
   // 確実なのでそちらを優先する(テーブルレイアウトの崩れ等で誤った文字列を
   // 拾ってしまうケースへの対策)。ASINで紐付けられない場合でも、商品が
   // 1件だけの注文でリンクの候補も1件だけに絞れるなら、それを使う。
-  const { byAsin: linkNamesByAsin, all: linkNameCandidates } = extractProductLinkNames(rawInput);
+  const { byAsin: linkNamesByAsin, all: linkNameCandidates } = extractProductLinkNames(scopedInput);
   const uniqueLinkNames = Array.from(new Set(linkNameCandidates.map((c) => c.name)));
   items.forEach((item) => {
     if (item.asin && linkNamesByAsin.has(item.asin)) {
