@@ -1327,9 +1327,14 @@ async function processSingleMessageForBulk(id, token, email) {
 
   const headers = (json.payload && json.payload.headers) || [];
   const subject = (headers.find((h) => h.name === "Subject") || {}).value || "";
+  const from = (headers.find((h) => h.name === "From") || {}).value || "";
   const dateMs = json.internalDate ? parseInt(json.internalDate, 10) : null;
   const dateStr = dateMs ? new Date(dateMs).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10);
 
+  // 「marketplace-messages@」は出品者への評価依頼メール等で、注文内容や金額を
+  // 含まない(=誤って無関係な数字を商品情報として拾ってしまう原因になりうる)
+  // ため、そもそも解析の対象から外す。
+  if (/marketplace-messages@/i.test(from)) return { id, skipped: true, dateMs };
   if (classifySubject(subject).tag === "warn") return { id, skipped: true, dateMs };
 
   const text = extractBodyText(json.payload);
