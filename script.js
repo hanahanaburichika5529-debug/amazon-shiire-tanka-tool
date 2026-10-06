@@ -1318,11 +1318,28 @@ async function listAllMessageIds(query, token, maxTotal) {
 }
 
 /**
+ * Amazonのメールは「価格=その行の合計」と「価格=単価(数量は別記載)」の
+ * どちらの書式もあり、一括取得では人が目で確認して選べないため、
+ * 注文合計(parseAmazonOrderEmailが検出したorderTotal)との整合性から
+ * 推定する。価格×数量の方が注文合計に近ければ、価格は単価とみなす。
+ * 判断材料がない場合は、従来通り保守的に「価格=合計」のままとする。
+ */
+function inferIsUnitPrice(item, orderTotal) {
+  if (item.quantity <= 1 || orderTotal === null) return false;
+  const diffAsTotal = Math.abs(item.price - orderTotal);
+  const diffAsUnit = Math.abs(item.price * item.quantity - orderTotal);
+  return diffAsUnit < diffAsTotal;
+}
+
+/**
  * 1件のメールを取得・分類・解析し、キャンセル等でなければ商品ごとに
  * 記録へ保存する。件名が「キャンセル/支払い問題の可能性」に分類される
  * ものは、実際の購入が成立していない可能性が高いため保存しない。
+ * savedOrderKeysは呼び出し元と共有するSetで、同じ注文番号+商品が
+ * 既に保存済みなら重複保存しない(同一注文で「発送済み」「配達中」等
+ * 複数のメールが届き、どちらも安全判定されて二重に保存されるのを防ぐ)。
  */
-async function processSingleMessageForBulk(id, token, email) {
+async function processSingleMessageForBulk(id, token, email, savedOrderKeys) {
   const res = await googleFetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=full`, {}, token);
   const json = await res.json();
   if (!res.ok) return { id, skipped: true };
@@ -1343,9 +1360,17 @@ async function processSingleMessageForBulk(id, token, email) {
   const parsed = parseAmazonOrderEmail(text);
   if (parsed.items.length === 0) return { id, skipped: true, dateMs };
 
+  let savedCount = 0;
   for (const item of parsed.items) {
-    const unitPrice = item.isUnitPrice ? item.price : item.price / (item.quantity || 1);
-    const amount = item.isUnitPrice ? item.price * item.quantity : item.price;
+    if (parsed.orderNumber) {
+      const key = parsed.orderNumber + "|" + (item.asin || item.name);
+      if (savedOrderKeys.has(key)) continue; // 同じ注文の別メール(発送済み/配達中等)による二重保存を防ぐ
+      savedOrderKeys.add(key);
+    }
+
+    const isUnitPrice = inferIsUnitPrice(item, parsed.orderTotal);
+    const unitPrice = isUnitPrice ? item.price : item.price / (item.quantity || 1);
+    const amount = isUnitPrice ? item.price * item.quantity : item.price;
     await appendPurchaseRecord({
       date: dateStr,
       name: item.name,
@@ -1356,8 +1381,9 @@ async function processSingleMessageForBulk(id, token, email) {
       source: "bulk",
       orderNumber: parsed.orderNumber || "",
     }, token, email);
+    savedCount++;
   }
-  return { id, skipped: false, savedCount: parsed.items.length, dateMs };
+  return { id, skipped: savedCount === 0, savedCount, dateMs };
 }
 
 /**
@@ -1385,6 +1411,13 @@ async function runBulkFetch() {
       return;
     }
 
+    // 同じ注文番号の商品が既に記録済みなら、別のメール(発送済み/配達中等)経由
+    // でも二重保存しないよう、保存済みの「注文番号+商品」の組をあらかじめ集めておく。
+    const existingRecords = await fetchPurchaseRecords(token, email, true);
+    const savedOrderKeys = new Set(
+      existingRecords.filter((r) => r.orderNumber).map((r) => r.orderNumber + "|" + (r.asin || r.name))
+    );
+
     let savedItems = 0, skippedCount = 0, doneCount = 0;
     let minDateMs = null, maxDateMs = null;
     const processedIds = [];
@@ -1393,7 +1426,7 @@ async function runBulkFetch() {
       const batch = newIds.slice(i, i + BULK_BATCH_SIZE);
       $("bulkStatus").textContent = `処理中… ${doneCount}/${newIds.length}件`;
       const results = await Promise.all(batch.map((id) =>
-        processSingleMessageForBulk(id, token, email).catch(() => ({ id, skipped: true }))
+        processSingleMessageForBulk(id, token, email, savedOrderKeys).catch(() => ({ id, skipped: true }))
       ));
       results.forEach((r) => {
         doneCount++;
