@@ -1282,18 +1282,20 @@ function renderBulkHistory(email) {
   const list = email ? getBulkRunHistory(email) : [];
   if (list.length === 0) { el.innerHTML = ""; return; }
   el.innerHTML = `
-    <table class="import-table" style="margin-top:10px;">
-      <thead><tr><th>実行日時</th><th>対象期間</th><th>新規確認</th><th>保存</th><th>スキップ</th></tr></thead>
-      <tbody>${list.map((h) => `
-        <tr>
-          <td>${new Date(h.ranAt).toLocaleString("ja-JP")}</td>
-          <td>${h.fromDate && h.toDate ? `${h.fromDate} 〜 ${h.toDate}` : "（該当なし）"}</td>
-          <td>${h.newMessages}件</td>
-          <td>${h.savedItems}件</td>
-          <td>${h.skipped}件</td>
-        </tr>
-      `).join("")}</tbody>
-    </table>
+    <div class="table-scroll">
+      <table class="record-breakdown-table bulk-history-table" style="margin-top:10px;">
+        <thead><tr><th>実行日時</th><th>対象期間</th><th>新規確認</th><th>保存</th><th>スキップ</th></tr></thead>
+        <tbody>${list.map((h) => `
+          <tr>
+            <td>${new Date(h.ranAt).toLocaleString("ja-JP")}</td>
+            <td>${h.fromDate && h.toDate ? `${h.fromDate} 〜 ${h.toDate}` : "（該当なし）"}</td>
+            <td>${h.newMessages}件</td>
+            <td>${h.savedItems}件</td>
+            <td>${h.skipped}件</td>
+          </tr>
+        `).join("")}</tbody>
+      </table>
+    </div>
   `;
 }
 

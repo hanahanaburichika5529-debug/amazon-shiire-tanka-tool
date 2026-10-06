@@ -315,6 +315,8 @@ body {
 .period-breakdown-row > td { background: var(--bg); padding: 10px !important; }
 .record-breakdown-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .record-breakdown-table th, .record-breakdown-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: left; }
+.bulk-history-table { font-size: 11.5px; }
+.bulk-history-table th, .bulk-history-table td { white-space: nowrap; }
 .import-table td.import-actions { display: flex; flex-direction: column; gap: 4px; }
 #periodCard .btn, #importReview .btn { margin-top: 8px; margin-right: 8px; }
 
