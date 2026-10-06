@@ -1500,6 +1500,58 @@ async function deletePurchaseRecord(record) {
   delete cachedRecordsByEmail[record.email];
 }
 
+/**
+ * 複数の記録をまとめて削除する。同じアカウント(スプレッドシート)内の
+ * 複数行を1回のbatchUpdateで削除する場合、行番号が大きい方から先に
+ * 削除リクエストを並べる必要がある(先に手前の行を消すと、後続行の
+ * 番号がずれて後のリクエストが別の行を消してしまうため)。
+ */
+async function deletePurchaseRecords(records) {
+  const byEmail = new Map();
+  records.forEach((r) => {
+    if (!byEmail.has(r.email)) byEmail.set(r.email, []);
+    byEmail.get(r.email).push(r);
+  });
+
+  for (const [email, group] of byEmail) {
+    const token = connectedAccounts[email];
+    if (!token) throw new Error(`${email} は連携済みではありません`);
+    const spreadsheetId = await ensurePurchaseSheet(token, email);
+    const gid = await getSheetGid(spreadsheetId, token);
+    const sorted = [...group].sort((a, b) => b.rowNumber - a.rowNumber);
+    const requests = sorted.map((r) => ({
+      deleteDimension: {
+        range: { sheetId: gid, dimension: "ROWS", startIndex: r.rowNumber - 1, endIndex: r.rowNumber },
+      },
+    }));
+    const res = await googleFetch(`https://sheets.googleapis.com/v4/spreadsheets/${spreadsheetId}:batchUpdate`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ requests }),
+    }, token);
+    const json = await res.json();
+    if (!res.ok) throw new Error((json.error && json.error.message) || "削除に失敗しました");
+    delete cachedRecordsByEmail[email];
+  }
+}
+
+/**
+ * 注文番号+商品(ASIN優先、無ければ商品名)が同じ記録が2件以上あるものを
+ * 重複候補としてグルーピングする。同一注文について「発送済み」
+ * 「配達中」等、複数のメールから別々に保存されてしまったケースを
+ * 検出するためのもの。注文番号が無い記録は判定材料がないため対象外。
+ */
+function findDuplicateRecords(records) {
+  const groups = new Map();
+  records.forEach((r) => {
+    if (!r.orderNumber) return;
+    const key = r.orderNumber + "|" + (r.asin || r.name);
+    if (!groups.has(key)) groups.set(key, []);
+    groups.get(key).push(r);
+  });
+  return Array.from(groups.values()).filter((g) => g.length > 1);
+}
+
 async function fetchPurchaseRecords(token, email, forceRefresh) {
   if (cachedRecordsByEmail[email] && !forceRefresh) return cachedRecordsByEmail[email];
   const sheetId = await ensurePurchaseSheet(token, email);
@@ -1686,6 +1738,54 @@ async function runPeriodAggregation(forceRefresh) {
   }
 }
 
+let currentDuplicateGroups = [];
+
+async function runDuplicateCheck() {
+  const emails = Object.keys(connectedAccounts);
+  if (emails.length === 0) { alert("先に「Googleと連携する」を行ってください。"); return; }
+  $("checkDuplicatesBtn").disabled = true;
+  $("duplicateStatus").textContent = "確認中…";
+  try {
+    const records = await fetchAllAccountsPurchaseRecords(true);
+    const groups = findDuplicateRecords(records);
+    renderDuplicateList(groups);
+    $("duplicateStatus").textContent = groups.length === 0
+      ? "重複の可能性がある記録は見つかりませんでした。"
+      : `${groups.length}件の注文で重複の可能性がある記録が見つかりました。残す行を選んでください。`;
+  } catch (e) {
+    $("duplicateStatus").textContent = "エラー: " + e.message;
+  } finally {
+    $("checkDuplicatesBtn").disabled = false;
+  }
+}
+
+function renderDuplicateList(groups) {
+  currentDuplicateGroups = groups;
+  const el = $("duplicateList");
+  if (groups.length === 0) { el.innerHTML = ""; return; }
+  el.innerHTML = groups.map((g, gIdx) => `
+    <div style="margin-top:14px;padding:10px;background:var(--bg);border-radius:8px;">
+      <p class="hint" style="margin:0 0 6px;"><strong>${escapeHtml(g[0].name)}</strong>${g[0].asin ? `（${escapeHtml(g[0].asin)}）` : ""} ／ 注文番号: ${escapeHtml(g[0].orderNumber)}</p>
+      <div class="table-scroll">
+        <table class="record-breakdown-table">
+          <thead><tr><th>日付</th><th>数量</th><th>単価</th><th>金額</th><th>取得元</th><th>アカウント</th><th></th></tr></thead>
+          <tbody>${g.map((r, rIdx) => `
+            <tr>
+              <td>${escapeHtml(r.date)}</td>
+              <td>${r.quantity}</td>
+              <td>${yen(r.unitPrice)}</td>
+              <td>${yen(r.amount)}</td>
+              <td>${escapeHtml(r.source)}</td>
+              <td>${escapeHtml(r.email)}</td>
+              <td><button type="button" class="btn btn--primary" data-action="keep-only" data-group-idx="${gIdx}" data-record-idx="${rIdx}">これだけ残す</button></td>
+            </tr>
+          `).join("")}</tbody>
+        </table>
+      </div>
+    </div>
+  `).join("");
+}
+
 function attachPeriodEvents() {
   document.querySelectorAll(".period-presets .btn").forEach((btn) => {
     btn.addEventListener("click", () => setPeriodPreset(btn.dataset.preset, btn));
@@ -1725,6 +1825,26 @@ function attachPeriodEvents() {
         alert("削除に失敗しました: " + err.message);
         deleteBtn.disabled = false;
       }
+    }
+  });
+
+  $("checkDuplicatesBtn").addEventListener("click", runDuplicateCheck);
+  $("duplicateList").addEventListener("click", async (e) => {
+    const btn = e.target.closest('button[data-action="keep-only"]');
+    if (!btn) return;
+    const group = currentDuplicateGroups[parseInt(btn.dataset.groupIdx, 10)];
+    if (!group) return;
+    const keepIdx = parseInt(btn.dataset.recordIdx, 10);
+    const toDelete = group.filter((_, idx) => idx !== keepIdx);
+    if (!confirm(`${toDelete.length}件を削除し、1件だけ残します。よろしいですか？\n（元に戻せません）`)) return;
+    btn.disabled = true;
+    try {
+      await deletePurchaseRecords(toDelete);
+      await runDuplicateCheck();
+      await runPeriodAggregation(true);
+    } catch (err) {
+      alert("削除に失敗しました: " + err.message);
+      btn.disabled = false;
     }
   });
 }
