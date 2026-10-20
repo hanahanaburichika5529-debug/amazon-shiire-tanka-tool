@@ -1679,6 +1679,31 @@ function aggregateByPeriod(records, fromStr, toStr) {
     .sort((a, b) => b.amount - a.amount);
 }
 
+/**
+ * 「確認済み」チェックは、商品ごと(ASIN優先、無ければ商品名)にこの端末の
+ * ブラウザだけに覚えさせる印で、スプレッドシート側のデータは変更しない。
+ * 大量の集計結果の中から、まだ確認していない商品を見分けやすくするためのもの。
+ */
+const REVIEWED_PRODUCTS_KEY = "ppcalc_reviewedProducts";
+function getReviewedProducts() {
+  try { return new Set(JSON.parse(localStorage.getItem(REVIEWED_PRODUCTS_KEY)) || []); } catch (e) { return new Set(); }
+}
+function setReviewedProduct(key, reviewed) {
+  const set = getReviewedProducts();
+  if (reviewed) set.add(key); else set.delete(key);
+  localStorage.setItem(REVIEWED_PRODUCTS_KEY, JSON.stringify(Array.from(set)));
+}
+
+/**
+ * 商品名がAmazon側のメール表示で途中省略(「…」)されていて何の商品か
+ * 分からない場合に備え、内訳の各行から実際の注文ページへ直接飛べる
+ * リンクを出す(商品名はメールごとに異なる省略のされ方をするため、
+ * 集計行ではなく注文番号を持つ内訳行の単位でのみ付けられる)。
+ */
+function amazonOrderDetailsUrl(orderNumber) {
+  return `https://www.amazon.co.jp/gp/your-account/order-details?orderID=${encodeURIComponent(orderNumber)}`;
+}
+
 function renderPeriodResults(groups) {
   currentPeriodGroups = groups;
   const table = $("periodTable");
@@ -1689,10 +1714,15 @@ function renderPeriodResults(groups) {
   }
   table.hidden = false;
   $("periodStatus").textContent = `${groups.length}件の商品を集計しました。`;
+  const reviewed = getReviewedProducts();
   table.innerHTML = `
-    <thead><tr><th>商品名</th><th>数量計</th><th>金額計</th><th>加重平均単価</th><th></th></tr></thead>
-    <tbody>${groups.map((g, idx) => `
-      <tr>
+    <thead><tr><th>確認済み</th><th>商品名</th><th>数量計</th><th>金額計</th><th>加重平均単価</th><th></th></tr></thead>
+    <tbody>${groups.map((g, idx) => {
+      const key = g.asin || g.name;
+      const isReviewed = reviewed.has(key);
+      return `
+      <tr class="${isReviewed ? "is-reviewed" : ""}">
+        <td style="text-align:center;"><input type="checkbox" data-action="toggle-reviewed" data-idx="${idx}" ${isReviewed ? "checked" : ""} title="確認済みにする"></td>
         <td>${escapeHtml(g.name)}${g.asin ? `<br><small>${escapeHtml(g.asin)}</small>` : ""}</td>
         <td>${g.quantity}</td>
         <td>${yen(g.amount)}</td>
@@ -1700,10 +1730,11 @@ function renderPeriodResults(groups) {
         <td>
           <button type="button" class="btn" data-action="toggle-breakdown" data-idx="${idx}">内訳（${g.records.length}件）</button>
           <button type="button" class="btn btn--primary" data-action="use-period-avg" data-idx="${idx}">計算ツールへ反映</button>
+          <button type="button" class="btn btn--danger" data-action="delete-group" data-idx="${idx}">この商品を削除</button>
         </td>
       </tr>
       <tr class="period-breakdown-row" data-group-idx="${idx}" hidden>
-        <td colspan="5">
+        <td colspan="6">
           <table class="record-breakdown-table">
             <thead><tr><th>日付</th><th>数量</th><th>金額</th><th>アカウント／注文番号</th><th></th></tr></thead>
             <tbody>${g.records.map((r, rIdx) => `
@@ -1711,14 +1742,15 @@ function renderPeriodResults(groups) {
                 <td>${escapeHtml(r.date)}</td>
                 <td>${r.quantity}</td>
                 <td>${yen(r.amount)}</td>
-                <td>${escapeHtml(r.email)}${r.orderNumber ? `<br><small>${escapeHtml(r.orderNumber)}</small>` : ""}</td>
+                <td>${escapeHtml(r.email)}${r.orderNumber ? `<br><small>${escapeHtml(r.orderNumber)}</small> <a href="${amazonOrderDetailsUrl(r.orderNumber)}" target="_blank" rel="noopener">Amazonで確認</a>` : ""}</td>
                 <td><button type="button" class="btn btn--danger" data-action="delete-record" data-group-idx="${idx}" data-record-idx="${rIdx}">削除</button></td>
               </tr>
             `).join("")}</tbody>
           </table>
         </td>
       </tr>
-    `).join("")}</tbody>
+    `;
+    }).join("")}</tbody>
   `;
 }
 
@@ -1878,7 +1910,32 @@ function attachPeriodEvents() {
         alert("削除に失敗しました: " + err.message);
         deleteBtn.disabled = false;
       }
+      return;
     }
+
+    const deleteGroupBtn = e.target.closest('button[data-action="delete-group"]');
+    if (deleteGroupBtn) {
+      const group = currentPeriodGroups[parseInt(deleteGroupBtn.dataset.idx, 10)];
+      if (!group) return;
+      if (!confirm(`「${group.name}」の記録を${group.records.length}件まとめて削除しますか？\n（元に戻せません）`)) return;
+      deleteGroupBtn.disabled = true;
+      try {
+        await deletePurchaseRecords(group.records);
+        await runPeriodAggregation(true);
+      } catch (err) {
+        alert("削除に失敗しました: " + err.message);
+        deleteGroupBtn.disabled = false;
+      }
+    }
+  });
+  $("periodTable").addEventListener("change", (e) => {
+    const cb = e.target.closest('input[data-action="toggle-reviewed"]');
+    if (!cb) return;
+    const g = currentPeriodGroups[parseInt(cb.dataset.idx, 10)];
+    if (!g) return;
+    setReviewedProduct(g.asin || g.name, cb.checked);
+    const row = cb.closest("tr");
+    if (row) row.classList.toggle("is-reviewed", cb.checked);
   });
 
   $("checkDuplicatesBtn").addEventListener("click", runDuplicateCheck);

@@ -308,6 +308,7 @@ body {
 .period-presets .btn.is-active { background: var(--navy-light); color: #fff; border-color: var(--navy-light); }
 
 .period-breakdown-row > td { background: var(--bg); padding: 10px !important; }
+#periodTable > tbody > tr.is-reviewed > td { background: var(--green-bg); }
 .record-breakdown-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .record-breakdown-table th, .record-breakdown-table td { padding: 5px 6px; border-bottom: 1px solid var(--border); text-align: left; }
 .bulk-history-table { font-size: 11.5px; }
