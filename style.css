@@ -75,11 +75,6 @@ body {
   .layout { grid-template-columns: 1fr; }
 }
 
-.panel--result { position: sticky; top: 16px; }
-@media (max-width: 880px) {
-  .panel--result { position: static; }
-}
-
 /* 期間集計は表が横に長いため、2カラムの外に出して画面幅いっぱいに表示する */
 .panel--full { grid-column: 1 / -1; }
 
