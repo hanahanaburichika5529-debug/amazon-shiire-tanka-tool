@@ -1024,30 +1024,37 @@ function googleConnect(forceAccountPicker) {
  */
 async function attemptSilentReconnectAll() {
   const clientId = $("googleClientId").value.trim();
+  // 既に連携済みのアカウントへ再度ポップアップを試みるのは無駄なだけでなく、
+  // 1クリックにつきブラウザが許可するポップアップは基本的に1つだけなため、
+  // 未接続のアカウント(pending)だけを対象にする。
   const remembered = getRememberedAccounts();
-  if (!clientId || remembered.length === 0) return;
+  const pending = remembered.filter((email) => !connectedAccounts[email]);
+  if (!clientId || pending.length === 0) return;
 
   ensureGisLoaded(async () => {
     ensureTokenClient(clientId);
     let successCount = 0;
-    for (let i = 0; i < remembered.length; i++) {
-      $("gmailStatus").textContent = `前回連携したアカウントに自動で再接続しています…（${i + 1}/${remembered.length}）`;
+    for (let i = 0; i < pending.length; i++) {
+      $("gmailStatus").textContent = `前回連携したアカウントに自動で再接続しています…（${i + 1}/${pending.length}）`;
       try {
-        const token = await requestToken({ prompt: "", hint: remembered[i] });
-        await registerConnectedAccount(token, { keepCurrent: successCount > 0 });
+        const token = await requestToken({ prompt: "", hint: pending[i] });
+        await registerConnectedAccount(token, { keepCurrent: successCount > 0 || Object.keys(connectedAccounts).length > 1 });
         successCount++;
       } catch (e) {
-        // このアカウントはブラウザ側でログアウトされている、あるいはページを開いた
-        // 直後の自動実行はポップアップブロックの対象になり得るため失敗することがある。
-        // ユーザーのクリックを伴う再試行ボタン(gmailReconnectBtn)に委ねればポップアップ
-        // ブロックの対象外になり成功することが多いため、ここでは諦めて次へ進む。
+        // このアカウントはブラウザ側でログアウトされている、あるいは1クリックにつき
+        // 1つまでというブラウザのポップアップ制限に阻まれて失敗することがある。
+        // 複数アカウントを一度に全て自動復元することはできないため、ここでは諦めて
+        // 次へ進み、残りは「+ 別のアカウントを追加」での手動選択に委ねる。
       }
     }
     if (successCount > 0) {
       $("gmailNotConnected").hidden = true;
       $("gmailConnected").hidden = false;
       renderAccountSwitcher();
-      $("gmailStatus").textContent = `${successCount}/${remembered.length} アカウントに自動再接続しました。`;
+      const remaining = pending.length - successCount;
+      $("gmailStatus").textContent = remaining > 0
+        ? `${successCount}/${pending.length} アカウントに自動再接続しました。ブラウザの制限で1クリックでは全アカウントを復元できないため、残り${remaining}件は上の「+ 別のアカウントを追加」から選び直してください（パスワード再入力は不要です）。`
+        : `${successCount}/${pending.length} アカウントに自動再接続しました。`;
       gmailFetchOrders();
     } else {
       $("gmailStatus").textContent = "";
