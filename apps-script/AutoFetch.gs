@@ -32,7 +32,27 @@ const MAX_MESSAGES_PER_RUN = 200; // 1回の実行での上限(実行時間・Gm
  * メイン処理
  * ============================================================ */
 
+/**
+ * 認可直後の実行は、許可画面を挟んで同じ関数が意図せず複数回動くことが
+ * あるため、スクリプトロックで同時実行を防ぐ。ロックを取れなかった
+ * (=既に別の実行が進行中)場合は、何もせず静かに終了する。
+ */
 function autoFetchPurchaseRecords() {
+  const lock = LockService.getScriptLock();
+  try {
+    lock.waitLock(30000);
+  } catch (e) {
+    Logger.log("他の実行が進行中のため、今回はスキップしました。");
+    return;
+  }
+  try {
+    autoFetchPurchaseRecords_();
+  } finally {
+    lock.releaseLock();
+  }
+}
+
+function autoFetchPurchaseRecords_() {
   const sheet = getOrCreateSheet_();
   const existingRecords = readExistingRecords_(sheet);
   const savedOrderKeys = new Set(
@@ -272,6 +292,7 @@ function parseAmazonOrderEmail_(rawInput) {
   const qtyRe = /(?:数量|個数)[:：]?\s*(\d+)|×\s?(\d+)\s*$/;
   const dividerRe = /^[-=_~･・…\s]{3,}$/;
   const nonNameRe = /^(注文|合計|小計|配送|消費税|お届け|数量|ご注文|お支払い|送信先|お届け先|発送|配達)/;
+  const numericOnlyRe = /^[\d,.\s]+$/;
 
   const toNum = (s) => parseInt(String(s).replace(/,/g, ""), 10);
 
@@ -337,7 +358,7 @@ function parseAmazonOrderEmail_(rawInput) {
     }
   });
 
-  const isPlausibleName = (l) => l && l.length >= 3 && !priceRe.test(l) && !qtyRe.test(l) && !nonNameRe.test(l) && !dividerRe.test(l);
+  const isPlausibleName = (l) => l && l.length >= 3 && !priceRe.test(l) && !qtyRe.test(l) && !nonNameRe.test(l) && !dividerRe.test(l) && !numericOnlyRe.test(l);
   const findNearbyLabel = (idx) => {
     for (let d = 1; d <= 4; d++) {
       const before = lines[idx - d];

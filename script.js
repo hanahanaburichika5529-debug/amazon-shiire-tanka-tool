@@ -554,6 +554,9 @@ function parseAmazonOrderEmail(rawInput) {
   const qtyRe = /(?:数量|個数)[:：]?\s*(\d+)|×\s?(\d+)\s*$/;
   const dividerRe = /^[-=_~･・…\s]{3,}$/;
   const nonNameRe = /^(注文|合計|小計|配送|消費税|お届け|数量|ご注文|お支払い|送信先|お届け先|発送|配達)/;
+  // ¥記号の無い裸の数字(小計・ポイント等の値がそのまま1行になっているケース)が
+  // 商品名として誤って拾われるのを防ぐ。商品名が数字だけになることは実質無い。
+  const numericOnlyRe = /^[\d,.\s]+$/;
 
   const toNum = (s) => parseInt(String(s).replace(/,/g, ""), 10);
 
@@ -636,7 +639,7 @@ function parseAmazonOrderEmail(rawInput) {
 
   // 商品名は価格より前の行にあるのが基本形（名前→数量→価格の順）なので、
   // 後続行より先に手前側を探す。後続行を同格に探すと次の商品名を誤って拾う。
-  const isPlausibleName = (l) => l && l.length >= 3 && !priceRe.test(l) && !qtyRe.test(l) && !nonNameRe.test(l) && !dividerRe.test(l);
+  const isPlausibleName = (l) => l && l.length >= 3 && !priceRe.test(l) && !qtyRe.test(l) && !nonNameRe.test(l) && !dividerRe.test(l) && !numericOnlyRe.test(l);
   const findNearbyLabel = (idx) => {
     for (let d = 1; d <= 4; d++) {
       const before = lines[idx - d];
@@ -1762,6 +1765,7 @@ async function runDuplicateCheck() {
 function renderDuplicateList(groups) {
   currentDuplicateGroups = groups;
   const el = $("duplicateList");
+  $("autoResolveDuplicatesBtn").hidden = groups.length === 0;
   if (groups.length === 0) { el.innerHTML = ""; return; }
   el.innerHTML = groups.map((g, gIdx) => `
     <div style="margin-top:14px;padding:10px;background:var(--bg);border-radius:8px;">
@@ -1784,6 +1788,33 @@ function renderDuplicateList(groups) {
       </div>
     </div>
   `).join("");
+}
+
+/**
+ * 重複グループが大量にある場合(自動取得の二重実行等)、1件ずつ「これだけ残す」を
+ * 押すのは非現実的なため、全グループについて行番号が最も若い(＝最初に保存された)
+ * 1件だけを自動的に残し、残りをまとめて削除する。重複は注文番号+商品で判定済み
+ * （findDuplicateRecords）のため、グループ内のどれを残しても内容は同じ。
+ */
+async function autoResolveAllDuplicates() {
+  if (currentDuplicateGroups.length === 0) return;
+  const toDelete = [];
+  currentDuplicateGroups.forEach((group) => {
+    const sorted = [...group].sort((a, b) => a.rowNumber - b.rowNumber);
+    sorted.slice(1).forEach((r) => toDelete.push(r));
+  });
+  if (!confirm(`${currentDuplicateGroups.length}件の重複グループについて、それぞれ最初の1件だけ残し、残り${toDelete.length}件をまとめて削除します。\nよろしいですか？（元に戻せません）`)) return;
+  const btn = $("autoResolveDuplicatesBtn");
+  btn.disabled = true;
+  try {
+    await deletePurchaseRecords(toDelete);
+    await runDuplicateCheck();
+    await runPeriodAggregation(true);
+  } catch (err) {
+    alert("削除に失敗しました: " + err.message);
+  } finally {
+    btn.disabled = false;
+  }
 }
 
 function attachPeriodEvents() {
@@ -1829,6 +1860,7 @@ function attachPeriodEvents() {
   });
 
   $("checkDuplicatesBtn").addEventListener("click", runDuplicateCheck);
+  $("autoResolveDuplicatesBtn").addEventListener("click", autoResolveAllDuplicates);
   $("duplicateList").addEventListener("click", async (e) => {
     const btn = e.target.closest('button[data-action="keep-only"]');
     if (!btn) return;
