@@ -313,6 +313,24 @@
   <div class="card panel--full" id="periodCard">
     <h2>仕入れ単価の集計結果</h2>
     <p class="hint">保存した仕入れデータを期間・商品ごとに加重平均単価で集計します。連携済みの全アカウント分をまとめて計算します。</p>
+
+    <details style="margin:14px 0;">
+      <summary style="cursor:pointer;font-weight:600;">商品マスタ（商品名の表記ゆれをまとめる）</summary>
+      <p class="hint">Amazonのメールは商品名が途中で省略されることがあり、同じ商品でも集計行が分かれてしまうことがあります。商品名に含まれる特徴的な一部（型番など、省略されても残りやすい短い文字列）をキーワードとして登録しておくと、そのキーワードを含む商品名は自動的にこの正式名称としてまとめて集計されます（この端末のブラウザにのみ保存され、スプレッドシート側は変更しません）。</p>
+      <div class="field-grid">
+        <label class="field">
+          <span>正式名称（集計表示に使う名前）</span>
+          <input type="text" id="masterCanonicalInput" placeholder="例: BEYBLADE X ベイブレードX BX-23 スターター フェニックスウィザード">
+        </label>
+        <label class="field">
+          <span>見分け用キーワード（商品名に含まれる一部）</span>
+          <input type="text" id="masterKeywordInput" placeholder="例: BX-23">
+        </label>
+      </div>
+      <button type="button" id="masterAddBtn" class="btn btn--primary">登録する</button>
+      <div id="masterList" style="margin-top:10px;"></div>
+    </details>
+
     <div class="period-presets">
       <button type="button" class="btn" data-preset="thisMonth">今月</button>
       <button type="button" class="btn" data-preset="lastMonth">先月</button>

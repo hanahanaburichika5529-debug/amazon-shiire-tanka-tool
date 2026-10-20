@@ -1652,6 +1652,61 @@ async function saveAllRowsToRecord() {
  * 期間内の「合計金額 ÷ 合計数量」＝加重平均単価を商品ごとに算出する。
  * 期間を指定しなければ全件（＝通算の仕入れ単価）になる。
  */
+/**
+ * 商品マスタ: Amazonのメールは商品名が途中で省略されることがあり、
+ * 同じ商品でも集計行が分かれてしまうことがある。「このキーワードを
+ * 含む商品名は、この正式名称の商品として扱う」という対応表を登録して
+ * おけると、表記ゆれを吸収して1つの集計行にまとめられる。
+ * この端末のブラウザにのみ保存し、スプレッドシート側は変更しない。
+ */
+const PRODUCT_MASTER_KEY = "ppcalc_productMaster";
+function getProductMaster() {
+  try { return JSON.parse(localStorage.getItem(PRODUCT_MASTER_KEY)) || []; } catch (e) { return []; }
+}
+function saveProductMaster(list) {
+  localStorage.setItem(PRODUCT_MASTER_KEY, JSON.stringify(list));
+}
+function addProductMasterEntry(canonical, keyword) {
+  const list = getProductMaster();
+  list.push({ canonical, keyword });
+  saveProductMaster(list);
+}
+function removeProductMasterEntry(idx) {
+  const list = getProductMaster();
+  list.splice(idx, 1);
+  saveProductMaster(list);
+}
+/**
+ * 商品名(省略されている可能性がある)が、マスタに登録したキーワードを
+ * 含んでいれば、そのマスタの正式名称を返す。登録が複数ヒットする場合は
+ * 先に登録した方を優先する。一致しなければnull。
+ */
+function matchProductMaster(name) {
+  const master = getProductMaster();
+  for (const entry of master) {
+    if (entry.keyword && name.includes(entry.keyword)) return entry.canonical;
+  }
+  return null;
+}
+
+function renderProductMaster() {
+  const list = getProductMaster();
+  const el = $("masterList");
+  if (list.length === 0) { el.innerHTML = `<p class="hint">登録されている商品マスタはまだありません。</p>`; return; }
+  el.innerHTML = `
+    <table class="record-breakdown-table">
+      <thead><tr><th>正式名称</th><th>キーワード</th><th></th></tr></thead>
+      <tbody>${list.map((entry, idx) => `
+        <tr>
+          <td>${escapeHtml(entry.canonical)}</td>
+          <td>${escapeHtml(entry.keyword)}</td>
+          <td><button type="button" class="btn btn--danger" data-action="delete-master" data-idx="${idx}">削除</button></td>
+        </tr>
+      `).join("")}</tbody>
+    </table>
+  `;
+}
+
 function aggregateByPeriod(records, fromStr, toStr) {
   const from = fromStr ? new Date(fromStr + "T00:00:00") : null;
   const to = toStr ? new Date(toStr + "T23:59:59") : null;
@@ -1665,8 +1720,9 @@ function aggregateByPeriod(records, fromStr, toStr) {
 
   const groups = new Map();
   filtered.forEach((r) => {
-    const key = r.asin || r.name;
-    if (!groups.has(key)) groups.set(key, { name: r.name, asin: r.asin, quantity: 0, amount: 0, records: [] });
+    const masterName = matchProductMaster(r.name);
+    const key = masterName || r.asin || r.name;
+    if (!groups.has(key)) groups.set(key, { name: masterName || r.name, asin: r.asin, quantity: 0, amount: 0, records: [] });
     const g = groups.get(key);
     g.quantity += r.quantity;
     g.amount += r.amount;
@@ -1872,6 +1928,23 @@ async function autoResolveAllDuplicates() {
 }
 
 function attachPeriodEvents() {
+  renderProductMaster();
+  $("masterAddBtn").addEventListener("click", () => {
+    const canonical = $("masterCanonicalInput").value.trim();
+    const keyword = $("masterKeywordInput").value.trim();
+    if (!canonical || !keyword) { alert("正式名称とキーワードの両方を入力してください。"); return; }
+    addProductMasterEntry(canonical, keyword);
+    $("masterCanonicalInput").value = "";
+    $("masterKeywordInput").value = "";
+    renderProductMaster();
+  });
+  $("masterList").addEventListener("click", (e) => {
+    const btn = e.target.closest('button[data-action="delete-master"]');
+    if (!btn) return;
+    removeProductMasterEntry(parseInt(btn.dataset.idx, 10));
+    renderProductMaster();
+  });
+
   document.querySelectorAll(".period-presets .btn").forEach((btn) => {
     btn.addEventListener("click", () => setPeriodPreset(btn.dataset.preset, btn));
   });
