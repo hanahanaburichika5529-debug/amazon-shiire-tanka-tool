@@ -1731,7 +1731,13 @@ function aggregateByPeriod(records, fromStr, toStr) {
   });
 
   return Array.from(groups.values())
-    .map((g) => ({ ...g, weightedAvgPrice: g.quantity > 0 ? g.amount / g.quantity : 0 }))
+    .map((g) => ({
+      ...g,
+      weightedAvgPrice: g.quantity > 0 ? g.amount / g.quantity : 0,
+      // 内訳は複数アカウントの記録を合算するため、保存された順(アカウント順)
+      // のままだと日付がバラバラになる。新しい順に並べ替えておく。
+      records: [...g.records].sort((a, b) => new Date(b.date) - new Date(a.date)),
+    }))
     .sort((a, b) => b.amount - a.amount);
 }
 
