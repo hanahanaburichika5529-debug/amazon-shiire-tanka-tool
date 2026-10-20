@@ -405,6 +405,17 @@ function parseAmazonOrderEmail_(rawInput) {
     }
   });
 
+  // 単一商品の注文で、商品欄のカタログ価格と実際の請求合計が大きく異なる場合
+  // (Amazonポイントを支払いに充当した注文等)、実際に支払った金額である合計を
+  // 優先する。
+  if (items.length === 1 && orderTotal !== null) {
+    const item = items[0];
+    if (Math.abs(item.price * item.quantity - orderTotal) > 1) {
+      item.price = orderTotal;
+      item.isUnitPrice = false;
+    }
+  }
+
   return { orderNumber: orderNumber, orderTotal: orderTotal, items: items };
 }
 

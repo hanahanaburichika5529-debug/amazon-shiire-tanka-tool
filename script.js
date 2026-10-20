@@ -693,6 +693,18 @@ function parseAmazonOrderEmail(rawInput) {
     }
   });
 
+  // 単一商品の注文で、商品欄に表示される価格(カタログ価格)と実際の請求合計が
+  // 大きく異なる場合がある(Amazonポイントを支払いに充当した注文等で、商品価格
+  // 欄はポイント控除前のまま、合計だけが控除後の実際の請求額になっているため)。
+  // 商品が1件だけなら曖昧さがないので、実際に支払った金額である合計を優先する。
+  if (items.length === 1 && orderTotal !== null) {
+    const item = items[0];
+    if (Math.abs(item.price * item.quantity - orderTotal) > 1) {
+      item.price = orderTotal;
+      item.isUnitPrice = false;
+    }
+  }
+
   const warnings = [];
   if (items.length === 0) warnings.push("金額を検出できませんでした。メール本文の形式をご確認ください。");
   if (orderTotal === null) warnings.push("注文合計を検出できませんでした。");
