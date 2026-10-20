@@ -781,6 +781,11 @@ function attachImportEvents() {
   if (savedClientId) $("googleClientId").value = savedClientId;
 
   $("gmailConnectBtn").addEventListener("click", () => googleConnect(false));
+  $("gmailReconnectBtn").addEventListener("click", () => {
+    $("gmailReconnectBtn").hidden = true;
+    $("gmailReconnectHint").hidden = true;
+    attemptSilentReconnectAll();
+  });
   $("gmailFetchBtn").addEventListener("click", gmailFetchOrders);
   $("bulkFetchBtn").addEventListener("click", runBulkFetch);
   $("openSheetBtn").addEventListener("click", async () => {
@@ -1032,8 +1037,10 @@ async function attemptSilentReconnectAll() {
         await registerConnectedAccount(token, { keepCurrent: successCount > 0 });
         successCount++;
       } catch (e) {
-        // このアカウントはブラウザ側でログアウトされている等、サイレント再連携できない。
-        // 手動での再連携(+ 別のアカウントを追加)が必要な状態のままにして次へ進む。
+        // このアカウントはブラウザ側でログアウトされている、あるいはページを開いた
+        // 直後の自動実行はポップアップブロックの対象になり得るため失敗することがある。
+        // ユーザーのクリックを伴う再試行ボタン(gmailReconnectBtn)に委ねればポップアップ
+        // ブロックの対象外になり成功することが多いため、ここでは諦めて次へ進む。
       }
     }
     if (successCount > 0) {
@@ -1044,6 +1051,10 @@ async function attemptSilentReconnectAll() {
       gmailFetchOrders();
     } else {
       $("gmailStatus").textContent = "";
+      // クリックを伴わない自動実行はブラウザのポップアップブロックに阻まれやすいため、
+      // ユーザー操作(クリック)付きで同じ処理を再試行できるボタンを表示する。
+      $("gmailReconnectBtn").hidden = false;
+      $("gmailReconnectHint").hidden = false;
     }
   }, () => { /* GISが読み込めない場合は自動再接続を諦め、手動連携ボタンに委ねる */ });
 }

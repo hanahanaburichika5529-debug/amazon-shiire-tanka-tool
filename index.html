@@ -50,6 +50,8 @@
           </ol>
         </details>
         <div id="gmailNotConnected">
+          <button type="button" id="gmailReconnectBtn" class="btn btn--primary" hidden>前回のアカウントに再接続する</button>
+          <p class="hint" id="gmailReconnectHint" hidden>ブラウザの仕様上、ページを開いた直後の自動再接続がブロックされることがあります。上のボタンを押せば再接続できます。</p>
           <label class="field" style="margin-bottom:10px;">
             <span>Google OAuth クライアントID</span>
             <input type="text" id="googleClientId" placeholder="xxxxxxxx.apps.googleusercontent.com">
