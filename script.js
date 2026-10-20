@@ -467,10 +467,14 @@ function escapeHtml(str) {
 }
 
 function stripHtml(html) {
+  // <style>/<script>はタグ自体を消しても中身(CSSのセレクタ名やJSコード)が
+  // 平文として残ってしまい、商品名候補として誤って拾われることがあるため、
+  // タグと中身をまとめて除去する。
+  const noStyleScript = html.replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<script[\s\S]*?<\/script>/gi, "");
   // 注文情報のテーブル(<td>)はセルごとに商品名/数量/金額が分かれているが、
   // </td>を改行に変換しないと同じ行につながってしまい、価格の近くの行を
   // 探す商品名検出がずれてしまう(セル同士は視覚的に別の項目として区切る)。
-  const withBreaks = html.replace(/<(br|\/p|\/tr|\/td|\/th|\/div|\/li|\/h[1-6])\s*\/?>/gi, "\n");
+  const withBreaks = noStyleScript.replace(/<(br|\/p|\/tr|\/td|\/th|\/div|\/li|\/h[1-6])\s*\/?>/gi, "\n");
   const noTags = withBreaks.replace(/<[^>]+>/g, " ");
   const ta = document.createElement("textarea");
   ta.innerHTML = noTags;

@@ -225,7 +225,8 @@ function decodeHtmlEntities_(str) {
 }
 
 function stripHtml_(html) {
-  const withBreaks = html.replace(/<(br|\/p|\/tr|\/td|\/th|\/div|\/li|\/h[1-6])\s*\/?>/gi, "\n");
+  const noStyleScript = html.replace(/<style[\s\S]*?<\/style>/gi, "").replace(/<script[\s\S]*?<\/script>/gi, "");
+  const withBreaks = noStyleScript.replace(/<(br|\/p|\/tr|\/td|\/th|\/div|\/li|\/h[1-6])\s*\/?>/gi, "\n");
   const noTags = withBreaks.replace(/<[^>]+>/g, " ");
   return decodeHtmlEntities_(noTags);
 }
