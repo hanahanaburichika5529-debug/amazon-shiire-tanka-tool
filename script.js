@@ -1984,6 +1984,39 @@ async function autoResolveAllDuplicates() {
   }
 }
 
+/**
+ * 連携済みの全アカウントの仕入れ記録を、期間を問わず全件削除する。
+ * 記録をやり直したい場合のための非常手段で、元に戻せないため、件数を
+ * 明示した上で必ず確認を取る。
+ */
+async function deleteAllRecords() {
+  const emails = Object.keys(connectedAccounts);
+  if (emails.length === 0) { alert("先に「Googleと連携する」を行ってください。"); return; }
+  const btn = $("deleteAllRecordsBtn");
+  btn.disabled = true;
+  $("deleteAllStatus").textContent = "件数を確認中…";
+  try {
+    const records = await fetchAllAccountsPurchaseRecords(true);
+    if (records.length === 0) {
+      $("deleteAllStatus").textContent = "削除する記録はありませんでした。";
+      return;
+    }
+    if (!confirm(`連携済み${emails.length}アカウント、合計${records.length}件の仕入れ記録を全て削除します。\nこの操作は元に戻せません。本当によろしいですか？`)) {
+      $("deleteAllStatus").textContent = "";
+      return;
+    }
+    $("deleteAllStatus").textContent = `削除中…（${records.length}件）`;
+    await deletePurchaseRecords(records);
+    $("deleteAllStatus").textContent = `${records.length}件の記録を削除しました。`;
+    await runPeriodAggregation(true);
+    await runDuplicateCheck();
+  } catch (e) {
+    $("deleteAllStatus").textContent = "エラー: " + e.message;
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 function attachPeriodEvents() {
   renderProductMaster();
   $("masterAddBtn").addEventListener("click", () => {
@@ -2070,6 +2103,7 @@ function attachPeriodEvents() {
 
   $("checkDuplicatesBtn").addEventListener("click", runDuplicateCheck);
   $("autoResolveDuplicatesBtn").addEventListener("click", autoResolveAllDuplicates);
+  $("deleteAllRecordsBtn").addEventListener("click", deleteAllRecords);
   $("duplicateList").addEventListener("click", async (e) => {
     const btn = e.target.closest('button[data-action="keep-only"]');
     if (!btn) return;
