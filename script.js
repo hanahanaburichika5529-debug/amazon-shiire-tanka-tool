@@ -1369,14 +1369,12 @@ function inferIsUnitPrice(item, orderTotal) {
 }
 
 /**
- * 1件のメールを取得・分類・解析し、キャンセル等でなければ商品ごとに
- * 記録へ保存する。件名が「キャンセル/支払い問題の可能性」に分類される
- * ものは、実際の購入が成立していない可能性が高いため保存しない。
- * savedOrderKeysは呼び出し元と共有するSetで、同じ注文番号+商品が
- * 既に保存済みなら重複保存しない(同一注文で「発送済み」「配達中」等
- * 複数のメールが届き、どちらも安全判定されて二重に保存されるのを防ぐ)。
+ * 1件のメールを取得・分類・解析するだけで、保存はしない(保存は呼び出し元が
+ * 複数メールをまとめて見てから行う。理由はfetchAndParseMessagesForBulkの
+ * コメントを参照)。件名が「キャンセル/支払い問題の可能性」に分類される
+ * ものは、実際の購入が成立していない可能性が高いため対象から除く。
  */
-async function processSingleMessageForBulk(id, token, email, savedOrderKeys) {
+async function fetchAndParseMessageForBulk(id, token) {
   const res = await googleFetch(`https://gmail.googleapis.com/gmail/v1/users/me/messages/${encodeURIComponent(id)}?format=full`, {}, token);
   const json = await res.json();
   if (!res.ok) return { id, skipped: true };
@@ -1391,36 +1389,44 @@ async function processSingleMessageForBulk(id, token, email, savedOrderKeys) {
   // 含まない(=誤って無関係な数字を商品情報として拾ってしまう原因になりうる)
   // ため、そもそも解析の対象から外す。
   if (/marketplace-messages@/i.test(from)) return { id, skipped: true, dateMs };
-  if (classifySubject(subject).tag === "warn") return { id, skipped: true, dateMs };
+  const classification = classifySubject(subject);
+  if (classification.tag === "warn") return { id, skipped: true, dateMs };
 
   const text = extractBodyText(json.payload);
   const parsed = parseAmazonOrderEmail(text);
   if (parsed.items.length === 0) return { id, skipped: true, dateMs };
 
-  let savedCount = 0;
-  for (const item of parsed.items) {
-    if (parsed.orderNumber) {
-      const key = parsed.orderNumber + "|" + (item.asin || item.name);
-      if (savedOrderKeys.has(key)) continue; // 同じ注文の別メール(発送済み/配達中等)による二重保存を防ぐ
-      savedOrderKeys.add(key);
-    }
+  return { id, skipped: false, dateMs, dateStr, classification: classification.tag, parsed };
+}
 
-    const isUnitPrice = inferIsUnitPrice(item, parsed.orderTotal);
-    const unitPrice = isUnitPrice ? item.price : item.price / (item.quantity || 1);
-    const amount = isUnitPrice ? item.price * item.quantity : item.price;
-    await appendPurchaseRecord({
-      date: dateStr,
-      name: item.name,
-      asin: item.asin || "",
-      quantity: item.quantity,
-      unitPrice,
-      amount,
-      source: "bulk",
-      orderNumber: parsed.orderNumber || "",
-    }, token, email);
-    savedCount++;
-  }
-  return { id, skipped: savedCount === 0, savedCount, dateMs };
+/**
+ * 同じ注文について「ご注文の確認」等の注文確認メールと、「発送済み」
+ * 「配達中」等の配送状況メールの両方が届くことがあるが、配送状況メールは
+ * Amazonポイントやクーポンによる値引きが反映される前の金額(カタログ価格)を
+ * そのまま表示していることがある一方、注文確認メールは実際に請求された
+ * 金額を表示している。そのため同じ注文番号+商品について複数のメールが
+ * 候補にある場合は、配送状況メール(safe)より注文確認メール(neutral)を
+ * 優先して採用する(どちらも配送状況メールの場合は、どちらでも表示される
+ * 金額に通常差はないため、先に見つかった方でよい)。
+ */
+function pickBestBulkCandidates(results) {
+  const bestByKey = new Map(); // key -> { item, parsed, dateStr, priority }
+  const noKeyRows = []; // 注文番号が無く重複判定できないものはそのまま採用する
+
+  results.forEach((r) => {
+    if (r.skipped || !r.parsed) return;
+    const priority = r.classification === "safe" ? 1 : 2; // neutral(注文確認)を優先
+    r.parsed.items.forEach((item) => {
+      if (!r.parsed.orderNumber) { noKeyRows.push({ item, parsed: r.parsed, dateStr: r.dateStr }); return; }
+      const key = r.parsed.orderNumber + "|" + (item.asin || item.name);
+      const existing = bestByKey.get(key);
+      if (!existing || priority > existing.priority) {
+        bestByKey.set(key, { item, parsed: r.parsed, dateStr: r.dateStr, priority });
+      }
+    });
+  });
+
+  return { byKey: bestByKey, noKeyRows };
 }
 
 /**
@@ -1428,6 +1434,22 @@ async function processSingleMessageForBulk(id, token, email, savedOrderKeys) {
  * どのメールを処理済みとしたかはアカウントごとにローカルへ記録し、次回以降は
  * 同じメールを再取得・重複保存しないようにする。
  */
+async function saveBulkCandidate(item, parsed, dateStr, token, email) {
+  const isUnitPrice = inferIsUnitPrice(item, parsed.orderTotal);
+  const unitPrice = isUnitPrice ? item.price : item.price / (item.quantity || 1);
+  const amount = isUnitPrice ? item.price * item.quantity : item.price;
+  await appendPurchaseRecord({
+    date: dateStr,
+    name: item.name,
+    asin: item.asin || "",
+    quantity: item.quantity,
+    unitPrice,
+    amount,
+    source: "bulk",
+    orderNumber: parsed.orderNumber || "",
+  }, token, email);
+}
+
 async function runBulkFetch() {
   if (!googleAccessToken || !currentAccountEmail) { alert("先に「Googleと連携する」を行ってください。"); return; }
   const token = googleAccessToken;
@@ -1455,15 +1477,16 @@ async function runBulkFetch() {
       existingRecords.filter((r) => r.orderNumber).map((r) => r.orderNumber + "|" + (r.asin || r.name))
     );
 
-    let savedItems = 0, skippedCount = 0, doneCount = 0;
+    let skippedCount = 0, doneCount = 0;
     let minDateMs = null, maxDateMs = null;
     const processedIds = [];
+    const fetchResults = [];
 
     for (let i = 0; i < newIds.length; i += BULK_BATCH_SIZE) {
       const batch = newIds.slice(i, i + BULK_BATCH_SIZE);
-      $("bulkStatus").textContent = `処理中… ${doneCount}/${newIds.length}件`;
+      $("bulkStatus").textContent = `取得中… ${doneCount}/${newIds.length}件`;
       const results = await Promise.all(batch.map((id) =>
-        processSingleMessageForBulk(id, token, email, savedOrderKeys).catch(() => ({ id, skipped: true }))
+        fetchAndParseMessageForBulk(id, token).catch(() => ({ id, skipped: true }))
       ));
       results.forEach((r) => {
         doneCount++;
@@ -1473,8 +1496,24 @@ async function runBulkFetch() {
           if (maxDateMs === null || r.dateMs > maxDateMs) maxDateMs = r.dateMs;
         }
         if (r.skipped) skippedCount++;
-        else savedItems += r.savedCount;
+        fetchResults.push(r);
       });
+    }
+
+    // 同じ注文番号+商品について複数のメールが候補にある場合、注文確認メールを
+    // 優先して1件だけ保存する(pickBestBulkCandidatesのコメントを参照)。
+    const { byKey, noKeyRows } = pickBestBulkCandidates(fetchResults);
+    let savedItems = 0;
+    $("bulkStatus").textContent = "保存中…";
+    for (const [key, cand] of byKey) {
+      if (savedOrderKeys.has(key)) continue;
+      savedOrderKeys.add(key);
+      await saveBulkCandidate(cand.item, cand.parsed, cand.dateStr, token, email);
+      savedItems++;
+    }
+    for (const cand of noKeyRows) {
+      await saveBulkCandidate(cand.item, cand.parsed, cand.dateStr, token, email);
+      savedItems++;
     }
 
     addBulkProcessedIds(email, processedIds);

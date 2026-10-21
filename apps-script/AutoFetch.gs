@@ -63,24 +63,37 @@ function autoFetchPurchaseRecords_() {
   let savedItems = 0;
   let skipped = 0;
   let errorCount = 0;
-  const rowsToAppend = [];
 
   try {
     const threads = GmailApp.search(GMAIL_QUERY, 0, MAX_MESSAGES_PER_RUN);
     const messages = [].concat.apply([], threads.map((t) => t.getMessages()));
+    const parseResults = [];
 
     messages.forEach((message) => {
       scanned++;
       try {
-        const result = processMessage_(message, savedOrderKeys);
+        const result = parseMessageForAuto_(message);
         if (result.skipped) skipped++;
-        savedItems += result.rows.length;
-        result.rows.forEach((row) => rowsToAppend.push(row));
-        result.newKeys.forEach((k) => savedOrderKeys.add(k));
+        parseResults.push(result);
       } catch (e) {
         errorCount++;
         Logger.log("メッセージ処理エラー (" + message.getId() + "): " + e.message);
       }
+    });
+
+    // 同じ注文番号+商品について複数のメールが候補にある場合、注文確認メールを
+    // 優先して1件だけ保存する(pickBestAutoCandidates_のコメントを参照)。
+    const picked = pickBestAutoCandidates_(parseResults);
+    const rowsToAppend = [];
+    Object.keys(picked.byKey).forEach((key) => {
+      if (savedOrderKeys.has(key)) return;
+      const cand = picked.byKey[key];
+      rowsToAppend.push(buildRow_(cand.item, cand.parsed, cand.dateStr));
+      savedItems++;
+    });
+    picked.noKeyRows.forEach((cand) => {
+      rowsToAppend.push(buildRow_(cand.item, cand.parsed, cand.dateStr));
+      savedItems++;
     });
 
     appendRows_(sheet, rowsToAppend);
@@ -93,44 +106,62 @@ function autoFetchPurchaseRecords_() {
 }
 
 /**
- * 1通のメールを分類・解析し、商品ごとに保存用の行を組み立てて返す。
- * 件名が「キャンセル/支払い問題の可能性」や、出品者への評価依頼メール
- * (marketplace-messages@)は、実際の購入が成立していない/金額情報を
- * 含まないため保存しない。savedOrderKeysに既にある注文番号+商品は、
- * 別のメール(発送済み/配達中等)からの重複保存として読み飛ばす。
+ * 1通のメールを分類・解析するだけで、行の組み立てはしない(複数メールを
+ * まとめて見てから、どのメールを採用するか決めるため。pickBestAutoCandidates_
+ * のコメントを参照)。件名が「キャンセル/支払い問題の可能性」や、出品者への
+ * 評価依頼メール(marketplace-messages@)は、実際の購入が成立していない/
+ * 金額情報を含まないため対象から除く。
  */
-function processMessage_(message, savedOrderKeys) {
+function parseMessageForAuto_(message) {
   const from = message.getFrom();
   const subject = message.getSubject();
-  const newKeys = [];
-  const rows = [];
 
-  if (/marketplace-messages@/i.test(from)) return { skipped: true, rows, newKeys };
-  if (classifySubject_(subject).tag === "warn") return { skipped: true, rows, newKeys };
+  if (/marketplace-messages@/i.test(from)) return { skipped: true };
+  const classification = classifySubject_(subject);
+  if (classification.tag === "warn") return { skipped: true };
 
   const html = message.getBody();
   const parsed = parseAmazonOrderEmail_(html);
-  if (parsed.items.length === 0) return { skipped: true, rows, newKeys };
+  if (parsed.items.length === 0) return { skipped: true };
 
   const dateStr = Utilities.formatDate(message.getDate(), Session.getScriptTimeZone(), "yyyy-MM-dd");
+  return { skipped: false, dateStr: dateStr, classification: classification.tag, parsed: parsed };
+}
 
-  parsed.items.forEach((item) => {
-    if (parsed.orderNumber) {
-      const key = parsed.orderNumber + "|" + (item.asin || item.name);
-      if (savedOrderKeys.has(key)) return;
-      newKeys.push(key);
-    }
+/**
+ * 同じ注文について「ご注文の確認」等の注文確認メールと、「発送済み」
+ * 「配達中」等の配送状況メールの両方が候補にあることがある。配送状況メールは
+ * Amazonポイントやクーポンによる値引きが反映される前の金額(カタログ価格)を
+ * そのまま表示していることがある一方、注文確認メールは実際に請求された
+ * 金額を表示しているため、配送状況メール(safe)より注文確認メール(neutral)を
+ * 優先して1件だけ採用する(どちらも配送状況メールの場合は、どちらでも表示
+ * される金額に通常差はないため、先に見つかった方でよい)。
+ */
+function pickBestAutoCandidates_(results) {
+  const bestByKey = {};
+  const noKeyRows = []; // 注文番号が無く重複判定できないものはそのまま採用する
 
-    const isUnitPrice = inferIsUnitPrice_(item, parsed.orderTotal);
-    const unitPrice = isUnitPrice ? item.price : item.price / (item.quantity || 1);
-    const amount = isUnitPrice ? item.price * item.quantity : item.price;
-
-    rows.push([
-      dateStr, item.name, item.asin || "", item.quantity, unitPrice, amount, "auto", parsed.orderNumber || "",
-    ]);
+  results.forEach((r) => {
+    if (r.skipped || !r.parsed) return;
+    const priority = r.classification === "safe" ? 1 : 2; // neutral(注文確認)を優先
+    r.parsed.items.forEach((item) => {
+      if (!r.parsed.orderNumber) { noKeyRows.push({ item: item, parsed: r.parsed, dateStr: r.dateStr }); return; }
+      const key = r.parsed.orderNumber + "|" + (item.asin || item.name);
+      const existing = bestByKey[key];
+      if (!existing || priority > existing.priority) {
+        bestByKey[key] = { item: item, parsed: r.parsed, dateStr: r.dateStr, priority: priority };
+      }
+    });
   });
 
-  return { skipped: rows.length === 0, rows, newKeys };
+  return { byKey: bestByKey, noKeyRows: noKeyRows };
+}
+
+function buildRow_(item, parsed, dateStr) {
+  const isUnitPrice = inferIsUnitPrice_(item, parsed.orderTotal);
+  const unitPrice = isUnitPrice ? item.price : item.price / (item.quantity || 1);
+  const amount = isUnitPrice ? item.price * item.quantity : item.price;
+  return [dateStr, item.name, item.asin || "", item.quantity, unitPrice, amount, "auto", parsed.orderNumber || ""];
 }
 
 function appendRows_(sheet, rows) {
