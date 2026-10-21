@@ -6,13 +6,19 @@
  * （Webツールと同じ「仕入れ単価計算ツール_仕入れ記録」）へ記録する。
  *
  * セットアップ手順（1アカウントにつき1回。7アカウント分、それぞれで設定が必要）
- *  1. そのGoogleアカウントで https://script.google.com/ を開き、「新しいプロジェクト」を作成
- *  2. 出てきたエディタの中身を全部消して、このファイルの内容を貼り付ける
- *  3. 上部の関数選択プルダウンで setupDailyTrigger を選び、実行ボタン(▷)を押す
+ *  1. まずWebツール側でそのGoogleアカウントと連携し(「Googleと連携する」または
+ *     「+ 別のアカウントを追加」)、「スプレッドシートを開く」ボタンを押して、
+ *     開いたページのURLから スプレッドシートID
+ *     （ https://docs.google.com/spreadsheets/d/【ここの文字列】/edit ）をコピーする。
+ *     これを下のSPREADSHEET_IDに貼り付けておく(省略するとWebツールと別の
+ *     スプレッドシートが作られてしまい、記録が2つに分かれてしまうため必須)。
+ *  2. そのGoogleアカウントで https://script.google.com/ を開き、「新しいプロジェクト」を作成
+ *  3. 出てきたエディタの中身を全部消して、このファイルの内容を貼り付ける
+ *  4. 上部の関数選択プルダウンで setupDailyTrigger を選び、実行ボタン(▷)を押す
  *     → 初回はGoogleの権限許可画面が出るので、Gmail読み取り・スプレッドシート
  *       編集・Driveへのアクセスを許可する
- *  4. 「成功」と出れば、毎日自動実行するトリガーが設定完了（以後は何もしなくてよい）
- *  5. 動作確認したい場合は、関数選択プルダウンで autoFetchPurchaseRecords を選んで
+ *  5. 「成功」と出れば、毎日自動実行するトリガーが設定完了（以後は何もしなくてよい）
+ *  6. 動作確認したい場合は、関数選択プルダウンで autoFetchPurchaseRecords を選んで
  *     実行すると、その場で1回分を試せる
  *
  * 実行結果は、スプレッドシート内の「実行履歴」タブで確認できる。
@@ -24,6 +30,16 @@ const SHEET_TAB = "仕入れ記録";
 const SHEET_HEADER = ["日付", "商品名", "ASIN", "数量", "単価", "金額", "取得元", "注文番号"];
 const HISTORY_TAB = "実行履歴";
 const HISTORY_HEADER = ["実行日時", "検索該当", "保存", "スキップ", "エラー"];
+
+// Webツール側はセキュリティ上「このツールが作成したファイルのみアクセス可」という
+// 限定的な権限(drive.file)で動いているため、Apps Script側が先に同名の
+// スプレッドシートを作成してしまうと、Webツールからはそのファイルが見えず、
+// 別の空のスプレッドシートを新規作成してしまう(記録が2つに分かれて見える不具合の原因)。
+// これを避けるには、Webツールの「スプレッドシートを開く」ボタンで開いたページの
+// URLから スプレッドシートID（ https://docs.google.com/spreadsheets/d/【ここ】/edit ）
+// をコピーし、下のSPREADSHEET_IDに貼り付けておく(空文字のままなら、従来通り
+// 名前で検索・無ければ新規作成する)。
+const SPREADSHEET_ID = "";
 
 const GMAIL_QUERY = "from:amazon.co.jp 発送"; // Webツールの初期値と同じ。必要に応じて書き換えてよい
 const MAX_MESSAGES_PER_RUN = 200; // 1回の実行での上限(実行時間・Gmail APIクォータの暴走防止)
@@ -175,15 +191,19 @@ function appendRows_(sheet, rows) {
  * ============================================================ */
 
 function getOrCreateSheet_() {
-  const files = DriveApp.getFilesByName(SHEET_TITLE);
   let ss;
-  if (files.hasNext()) {
-    ss = SpreadsheetApp.open(files.next());
+  if (SPREADSHEET_ID) {
+    ss = SpreadsheetApp.openById(SPREADSHEET_ID);
   } else {
-    ss = SpreadsheetApp.create(SHEET_TITLE);
-    const defaultSheet = ss.getSheets()[0];
-    defaultSheet.setName(SHEET_TAB);
-    defaultSheet.appendRow(SHEET_HEADER);
+    const files = DriveApp.getFilesByName(SHEET_TITLE);
+    if (files.hasNext()) {
+      ss = SpreadsheetApp.open(files.next());
+    } else {
+      ss = SpreadsheetApp.create(SHEET_TITLE);
+      const defaultSheet = ss.getSheets()[0];
+      defaultSheet.setName(SHEET_TAB);
+      defaultSheet.appendRow(SHEET_HEADER);
+    }
   }
   let sheet = ss.getSheetByName(SHEET_TAB);
   if (!sheet) {
@@ -211,9 +231,14 @@ function readExistingRecords_(sheet) {
 }
 
 function logRun_(scanned, savedItems, skipped, errorCount) {
-  const files = DriveApp.getFilesByName(SHEET_TITLE);
-  if (!files.hasNext()) return;
-  const ss = SpreadsheetApp.open(files.next());
+  let ss;
+  if (SPREADSHEET_ID) {
+    ss = SpreadsheetApp.openById(SPREADSHEET_ID);
+  } else {
+    const files = DriveApp.getFilesByName(SHEET_TITLE);
+    if (!files.hasNext()) return;
+    ss = SpreadsheetApp.open(files.next());
+  }
   const h = ss.getSheetByName(HISTORY_TAB) || ss.insertSheet(HISTORY_TAB);
   if (h.getLastRow() === 0) h.appendRow(HISTORY_HEADER);
   const now = Utilities.formatDate(new Date(), Session.getScriptTimeZone(), "yyyy-MM-dd HH:mm:ss");
