@@ -362,13 +362,13 @@ function renderHistory() {
   $("historyTable").hidden = list.length === 0;
   $("historyTableBody").innerHTML = list.slice().reverse().map(entry => `
     <tr>
-      <td>${entry.savedAt}</td>
-      <td>${entry.productName || "（名称未設定）"}</td>
+      <td>${escapeHtml(entry.savedAt)}</td>
+      <td>${escapeHtml(entry.productName || "（名称未設定）")}</td>
       <td>${entry.mode === "reverse" ? "仕入れ単価を計算" : "利益を計算"}</td>
-      <td>${entry.summary}</td>
+      <td>${escapeHtml(entry.summary)}</td>
       <td>
-        <button type="button" class="btn" data-action="load" data-id="${entry.id}">呼び出す</button>
-        <button type="button" class="btn btn--danger" data-action="delete" data-id="${entry.id}">削除</button>
+        <button type="button" class="btn" data-action="load" data-id="${escapeHtml(entry.id)}">呼び出す</button>
+        <button type="button" class="btn btn--danger" data-action="delete" data-id="${escapeHtml(entry.id)}">削除</button>
       </td>
     </tr>
   `).join("");
