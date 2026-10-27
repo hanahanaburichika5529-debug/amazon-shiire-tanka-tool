@@ -369,7 +369,10 @@ function extractProductLinkNames_(rawInput) {
 }
 
 function parseAmazonOrderEmail_(rawInput) {
-  const recommendationCutoffRe = /もう一度買う|おすすめ商品|よく一緒に購入されている商品|この商品を買った人はこんな商品も買っています/;
+  // moduleId-marketingSlotは実際の注文確認メールで確認された広告枠
+  // (「${hash-get display-group}のおすすめセール」等、見出し文言は一定しない)
+  // で、見出し文言ではなくHTML側のモジュール名で切り詰める方が確実。
+  const recommendationCutoffRe = /もう一度買う|おすすめ商品|よく一緒に購入されている商品|この商品を買った人はこんな商品も買っています|moduleId-marketingSlot/;
   const cutoffMatch = rawInput.match(recommendationCutoffRe);
   const scopedInput = cutoffMatch ? rawInput.slice(0, cutoffMatch.index) : rawInput;
 

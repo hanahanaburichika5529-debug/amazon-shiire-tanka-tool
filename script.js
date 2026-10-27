@@ -541,7 +541,10 @@ function parseAmazonOrderEmail(rawInput) {
   // 「もう一度買う」等のおすすめ商品欄は注文内容と無関係な商品・価格・リンクを
   // 大量に含むため、そこから先(フッター含む)は元のHTMLの時点で切り詰め、
   // 本文の行ベース解析だけでなくASIN・商品リンクの抽出にも一貫して効かせる。
-  const recommendationCutoffRe = /もう一度買う|おすすめ商品|よく一緒に購入されている商品|この商品を買った人はこんな商品も買っています/;
+  // moduleId-marketingSlotは実際の注文確認メールで確認された広告枠
+  // (「${hash-get display-group}のおすすめセール」等、見出し文言は一定しない)
+  // で、見出し文言ではなくHTML側のモジュール名で切り詰める方が確実。
+  const recommendationCutoffRe = /もう一度買う|おすすめ商品|よく一緒に購入されている商品|この商品を買った人はこんな商品も買っています|moduleId-marketingSlot/;
   const cutoffMatch = rawInput.match(recommendationCutoffRe);
   const scopedInput = cutoffMatch ? rawInput.slice(0, cutoffMatch.index) : rawInput;
 
