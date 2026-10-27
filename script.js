@@ -1390,7 +1390,13 @@ async function fetchAndParseMessageForBulk(id, token) {
   // ため、そもそも解析の対象から外す。
   if (/marketplace-messages@/i.test(from)) return { id, skipped: true, dateMs };
   const classification = classifySubject(subject);
-  if (classification.tag === "warn") return { id, skipped: true, dateMs };
+  if (classification.tag === "warn") {
+    // キャンセル/返金等のメール自体から商品は保存しないが、同じ注文番号の
+    // 他のメール(注文確認・発送済み等)が先に処理されて保存されてしまわない
+    // よう、注文番号だけは抽出して呼び出し元に伝える(pickBestBulkCandidates参照)。
+    const cancelledOrderNumber = parseAmazonOrderEmail(extractBodyText(json.payload)).orderNumber;
+    return { id, skipped: true, dateMs, cancelledOrderNumber };
+  }
 
   const text = extractBodyText(json.payload);
   const parsed = parseAmazonOrderEmail(text);
@@ -1408,13 +1414,23 @@ async function fetchAndParseMessageForBulk(id, token) {
  * 候補にある場合は、配送状況メール(safe)より注文確認メール(neutral)を
  * 優先して採用する(どちらも配送状況メールの場合は、どちらでも表示される
  * 金額に通常差はないため、先に見つかった方でよい)。
+ *
+ * また、同じ注文番号について「キャンセルされました」等のメール(warn判定、
+ * cancelledOrderNumberとして渡される)が1通でもあれば、その注文番号は
+ * 注文確認・発送済み等の他のメールがどれだけあっても一切採用しない
+ * (実際には成立しなかった注文を仕入れとして記録してしまうのを防ぐ)。
  */
 function pickBestBulkCandidates(results) {
+  const cancelledOrderNumbers = new Set(
+    results.filter((r) => r.cancelledOrderNumber).map((r) => r.cancelledOrderNumber)
+  );
+
   const bestByKey = new Map(); // key -> { item, parsed, dateStr, priority }
   const noKeyRows = []; // 注文番号が無く重複判定できないものはそのまま採用する
 
   results.forEach((r) => {
     if (r.skipped || !r.parsed) return;
+    if (r.parsed.orderNumber && cancelledOrderNumbers.has(r.parsed.orderNumber)) return;
     const priority = r.classification === "safe" ? 1 : 2; // neutral(注文確認)を優先
     r.parsed.items.forEach((item) => {
       if (!r.parsed.orderNumber) { noKeyRows.push({ item, parsed: r.parsed, dateStr: r.dateStr }); return; }
@@ -1426,7 +1442,7 @@ function pickBestBulkCandidates(results) {
     });
   });
 
-  return { byKey: bestByKey, noKeyRows };
+  return { byKey: bestByKey, noKeyRows, cancelledOrderNumbers };
 }
 
 /**
@@ -1502,7 +1518,7 @@ async function runBulkFetch() {
 
     // 同じ注文番号+商品について複数のメールが候補にある場合、注文確認メールを
     // 優先して1件だけ保存する(pickBestBulkCandidatesのコメントを参照)。
-    const { byKey, noKeyRows } = pickBestBulkCandidates(fetchResults);
+    const { byKey, noKeyRows, cancelledOrderNumbers } = pickBestBulkCandidates(fetchResults);
     let savedItems = 0;
     $("bulkStatus").textContent = "保存中…";
     for (const [key, cand] of byKey) {
@@ -1516,6 +1532,18 @@ async function runBulkFetch() {
       savedItems++;
     }
 
+    // キャンセルメールが見つかった注文番号について、過去の実行で既に
+    // 保存されてしまっている記録があれば、まとめて削除する(今回のメールだけ
+    // でなく、以前のメールから既に保存済みのケースも遡って正しておくため)。
+    let removedForCancellation = 0;
+    if (cancelledOrderNumbers.size > 0) {
+      const toRemove = existingRecords.filter((r) => r.orderNumber && cancelledOrderNumbers.has(r.orderNumber));
+      if (toRemove.length > 0) {
+        await deletePurchaseRecords(toRemove);
+        removedForCancellation = toRemove.length;
+      }
+    }
+
     addBulkProcessedIds(email, processedIds);
     delete cachedRecordsByEmail[email];
 
@@ -1527,7 +1555,8 @@ async function runBulkFetch() {
       fromDate: fmt(minDateMs), toDate: fmt(maxDateMs),
     });
 
-    $("bulkStatus").textContent = `完了: 新規${newIds.length}件を確認し、${savedItems}件の商品を記録に保存しました（${skippedCount}件はキャンセル等のためスキップ）。`;
+    $("bulkStatus").textContent = `完了: 新規${newIds.length}件を確認し、${savedItems}件の商品を記録に保存しました（${skippedCount}件はキャンセル等のためスキップ）。`
+      + (removedForCancellation > 0 ? ` キャンセル確認により既存の記録${removedForCancellation}件を削除しました。` : "");
     renderBulkHistory(email);
   } catch (e) {
     $("bulkStatus").textContent = "エラー: " + e.message;

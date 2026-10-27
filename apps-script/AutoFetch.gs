@@ -113,6 +113,10 @@ function autoFetchPurchaseRecords_() {
     });
 
     appendRows_(sheet, rowsToAppend);
+
+    // キャンセルメールが見つかった注文番号について、過去の実行で既に
+    // 保存されてしまっている記録があれば、まとめて削除する。
+    removeCancelledRows_(sheet, existingRecords, picked.cancelledOrderNumbers);
   } catch (e) {
     errorCount++;
     Logger.log("自動取得エラー: " + e.message);
@@ -134,7 +138,13 @@ function parseMessageForAuto_(message) {
 
   if (/marketplace-messages@/i.test(from)) return { skipped: true };
   const classification = classifySubject_(subject);
-  if (classification.tag === "warn") return { skipped: true };
+  if (classification.tag === "warn") {
+    // キャンセル/返金等のメール自体から商品は保存しないが、同じ注文番号の
+    // 他のメール(注文確認・発送済み等)が保存されてしまわないよう、注文番号
+    // だけは抽出して呼び出し元に伝える(pickBestAutoCandidates_のコメント参照)。
+    const cancelledOrderNumber = parseAmazonOrderEmail_(message.getBody()).orderNumber;
+    return { skipped: true, cancelledOrderNumber: cancelledOrderNumber };
+  }
 
   const html = message.getBody();
   const parsed = parseAmazonOrderEmail_(html);
@@ -152,13 +162,24 @@ function parseMessageForAuto_(message) {
  * 金額を表示しているため、配送状況メール(safe)より注文確認メール(neutral)を
  * 優先して1件だけ採用する(どちらも配送状況メールの場合は、どちらでも表示
  * される金額に通常差はないため、先に見つかった方でよい)。
+ *
+ * また、同じ注文番号について「キャンセルされました」等のメール(warn判定、
+ * cancelledOrderNumberとして渡される)が1通でもあれば、その注文番号は
+ * 他のメールがどれだけあっても一切採用しない(実際には成立しなかった注文を
+ * 仕入れとして記録してしまうのを防ぐ)。
  */
 function pickBestAutoCandidates_(results) {
+  const cancelledOrderNumbers = {};
+  results.forEach((r) => {
+    if (r.cancelledOrderNumber) cancelledOrderNumbers[r.cancelledOrderNumber] = true;
+  });
+
   const bestByKey = {};
   const noKeyRows = []; // 注文番号が無く重複判定できないものはそのまま採用する
 
   results.forEach((r) => {
     if (r.skipped || !r.parsed) return;
+    if (r.parsed.orderNumber && cancelledOrderNumbers[r.parsed.orderNumber]) return;
     const priority = r.classification === "safe" ? 1 : 2; // neutral(注文確認)を優先
     r.parsed.items.forEach((item) => {
       if (!r.parsed.orderNumber) { noKeyRows.push({ item: item, parsed: r.parsed, dateStr: r.dateStr }); return; }
@@ -170,7 +191,7 @@ function pickBestAutoCandidates_(results) {
     });
   });
 
-  return { byKey: bestByKey, noKeyRows: noKeyRows };
+  return { byKey: bestByKey, noKeyRows: noKeyRows, cancelledOrderNumbers: cancelledOrderNumbers };
 }
 
 function buildRow_(item, parsed, dateStr) {
@@ -222,12 +243,25 @@ function readExistingRecords_(sheet) {
   if (lastRow < 2) return [];
   const values = sheet.getRange(2, 1, lastRow - 1, SHEET_HEADER.length).getValues();
   return values
-    .map((r) => ({
+    .map((r, idx) => ({
       name: r[1] || "",
       asin: r[2] || "",
       orderNumber: r[7] || "",
+      rowNumber: idx + 2, // シート上の実際の行番号(2行目から始まるため+2)
     }))
     .filter((r) => r.name || r.orderNumber);
+}
+
+/**
+ * キャンセル等が判明した注文番号について、既にシートに保存済みの行が
+ * あれば削除する。行番号が大きい方から先に削除しないと、削除のたびに
+ * 後続行の番号がずれて別の行を消してしまうため、降順に処理する。
+ */
+function removeCancelledRows_(sheet, existingRecords, cancelledOrderNumbers) {
+  const toRemove = existingRecords.filter((r) => r.orderNumber && cancelledOrderNumbers[r.orderNumber]);
+  toRemove.sort((a, b) => b.rowNumber - a.rowNumber);
+  toRemove.forEach((r) => sheet.deleteRow(r.rowNumber));
+  return toRemove.length;
 }
 
 function logRun_(scanned, savedItems, skipped, errorCount) {
