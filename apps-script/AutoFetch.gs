@@ -101,12 +101,28 @@ function autoFetchPurchaseRecords_() {
     // 優先して1件だけ保存する(pickBestAutoCandidates_のコメントを参照)。
     const picked = pickBestAutoCandidates_(parseResults);
     const rowsToAppend = [];
+    const claimedRows = {};
+    let backfilledCount = 0;
     Object.keys(picked.byKey).forEach((key) => {
       if (savedOrderKeys.has(key)) return;
       const cand = picked.byKey[key];
+      // 以前の保存分はASINが空で名前が途中で切れていることがあり、キーが一致しない。
+      // 同じ注文の同じ商品が保存済みなら、二重に保存せず足りない情報だけを補う。
+      const match = findMatchingRecord_(existingRecords, cand.parsed.orderNumber, cand.item, claimedRows, calcRecordAmount_(cand.item, cand.parsed));
+      if (match.ambiguous) return;
+      if (match.record) {
+        claimedRows[match.record.rowNumber] = true;
+        const fields = buildRecordBackfill_(match.record, cand.item);
+        if (fields) {
+          sheet.getRange(match.record.rowNumber, 2, 1, 2).setValues([[fields.name, fields.asin]]);
+          backfilledCount++;
+        }
+        return;
+      }
       rowsToAppend.push(buildRow_(cand.item, cand.parsed, cand.dateStr));
       savedItems++;
     });
+    if (backfilledCount > 0) Logger.log("既存の記録" + backfilledCount + "件のASIN・商品名を補完しました。");
     picked.noKeyRows.forEach((cand) => {
       rowsToAppend.push(buildRow_(cand.item, cand.parsed, cand.dateStr));
       savedItems++;
@@ -194,6 +210,65 @@ function pickBestAutoCandidates_(results) {
   return { byKey: bestByKey, noKeyRows: noKeyRows, cancelledOrderNumbers: cancelledOrderNumbers };
 }
 
+function calcRecordAmount_(item, parsed) {
+  const isUnitPrice = inferIsUnitPrice_(item, parsed.orderTotal);
+  return isUnitPrice ? item.price * item.quantity : item.price;
+}
+
+/**
+ * 商品名の照合用の正規化(全角半角の統一・空白の圧縮・末尾の省略記号の除去・小文字化)。
+ * メール由来の名前は途中で「...」「…」と省略されていることがあるため、省略記号を
+ * 除いた先頭部分どうしの前方一致で同じ商品かを判定する。
+ */
+function normalizeNameForMatch_(name) {
+  return String(name || "").normalize("NFKC").replace(/\s+/g, " ").trim().replace(/\.{2,}$/, "").trim().toLowerCase();
+}
+
+/**
+ * 既存の記録行(rec)が、同じ注文の同じ商品(item)かどうか。ASINが両方あればASINの一致で、
+ * どちらかが無ければ名前(省略表示を考慮した前方一致)で判定する。
+ */
+function isSameOrderItem_(rec, orderNumber, item) {
+  if (!rec.orderNumber || rec.orderNumber !== orderNumber) return false;
+  if (rec.asin && item.asin) return rec.asin === item.asin;
+  const a = normalizeNameForMatch_(rec.name);
+  const b = normalizeNameForMatch_(item.name);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const shorter = a.length <= b.length ? a : b;
+  const longer = a.length <= b.length ? b : a;
+  return shorter.length >= 6 && longer.indexOf(shorter) === 0;
+}
+
+/**
+ * 保存済みの記録から、今回の商品に対応する行を探す。複数の行が該当する場合は数量と金額で
+ * 絞り込み、それでも1行に決まらなければ「曖昧」として、誤った行の更新も二重保存も避ける。
+ * 同じ行を2つの商品が取り合わないよう、claimedRows(使用済みの行番号)を除外する。
+ */
+function findMatchingRecord_(records, orderNumber, item, claimedRows, amount) {
+  if (!orderNumber) return { record: null, ambiguous: false };
+  const matches = records.filter((r) => !claimedRows[r.rowNumber] && isSameOrderItem_(r, orderNumber, item));
+  if (matches.length <= 1) return { record: matches[0] || null, ambiguous: false };
+  const narrowed = matches.filter((r) => r.quantity === item.quantity && Math.abs(r.amount - amount) < 1);
+  if (narrowed.length === 1) return { record: narrowed[0], ambiguous: false };
+  return { record: null, ambiguous: true };
+}
+
+/**
+ * 既存の行に足りない情報(ASIN、省略されていた商品名の続き)を今回の解析結果で補う。
+ * 補うべき変更が無ければnullを返す。
+ */
+function buildRecordBackfill_(rec, item) {
+  const asin = rec.asin || item.asin || "";
+  let name = rec.name;
+  if (/(\.{2,}|…)\s*$/.test(rec.name) && item.name.length > rec.name.length) {
+    const a = normalizeNameForMatch_(rec.name);
+    if (a && normalizeNameForMatch_(item.name).indexOf(a) === 0) name = item.name;
+  }
+  if (asin === (rec.asin || "") && name === rec.name) return null;
+  return { name: name, asin: asin };
+}
+
 function buildRow_(item, parsed, dateStr) {
   const isUnitPrice = inferIsUnitPrice_(item, parsed.orderTotal);
   const unitPrice = isUnitPrice ? item.price : item.price / (item.quantity || 1);
@@ -246,6 +321,8 @@ function readExistingRecords_(sheet) {
     .map((r, idx) => ({
       name: r[1] || "",
       asin: r[2] || "",
+      quantity: parseFloat(r[3]) || 0,
+      amount: parseFloat(r[5]) || 0,
       orderNumber: r[7] || "",
       rowNumber: idx + 2, // シート上の実際の行番号(2行目から始まるため+2)
     }))
@@ -332,11 +409,14 @@ function classifySubject_(subject) {
 }
 
 function extractAsinsInOrder_(rawInput) {
+  // クリック計測用のリダイレクトURL(.../r.html?...&U=https%3A%2F%2F...%2Fdp%2FASIN)では
+  // 「/」が%2Fにエンコードされているため、そのままでは/dp/に一致しない。
+  const normalized = rawInput.replace(/%2F/gi, "/");
   const re = /(?:\/dp\/|\/gp\/product\/|[?&]asin=)([A-Z0-9]{10})/g;
   const found = [];
   const seen = {};
   let m;
-  while ((m = re.exec(rawInput)) !== null) {
+  while ((m = re.exec(normalized)) !== null) {
     if (!seen[m[1]]) { seen[m[1]] = true; found.push(m[1]); }
   }
   return found;
@@ -347,17 +427,29 @@ function extractProductLinkNames_(rawInput) {
   const asinRe = /(?:\/dp\/|\/gp\/product\/|[?&]asin=)([A-Z0-9]{10})/i;
   const nonProductTextRe = /^(こちら|詳細|詳細を見る|商品を見る|注文履歴|注文の詳細|配送状況|配送状況を確認|レビュー|レビューを書く|返品|再購入|画像|アカウントサービス|Amazon\.co\.jp)$/i;
   const byAsin = {};
+  const altByAsin = {}; // 商品画像のalt属性(リンク文字列は省略表示でも、altには完全な商品名が入っている)
   const all = [];
   let m;
   while ((m = linkRe.exec(rawInput)) !== null) {
     const hrefRaw = m[1];
     let hrefDecoded = hrefRaw;
     try { hrefDecoded = decodeURIComponent(hrefRaw); } catch (e) { /* 不正なエンコードはそのまま使う */ }
-    const text = stripHtml_(m[2]).replace(/\s+/g, " ").trim();
-    if (text.length < 3 || nonProductTextRe.test(text)) continue;
-
     const asinMatch = hrefDecoded.match(asinRe) || hrefRaw.match(asinRe);
     const asin = asinMatch ? asinMatch[1] : null;
+
+    if (asin) {
+      const imgRe = /<img\b[^>]*\balt="([^"]*)"/gi;
+      let im;
+      while ((im = imgRe.exec(m[2])) !== null) {
+        const alt = stripHtml_(im[1]).replace(/\s+/g, " ").trim();
+        if (alt.length < 3 || nonProductTextRe.test(alt)) continue;
+        if (!altByAsin[asin]) altByAsin[asin] = [];
+        altByAsin[asin].push(alt);
+      }
+    }
+
+    const text = stripHtml_(m[2]).replace(/\s+/g, " ").trim();
+    if (text.length < 3 || nonProductTextRe.test(text)) continue;
 
     all.push({ asin, name: text });
     if (asin) {
@@ -365,7 +457,29 @@ function extractProductLinkNames_(rawInput) {
       if (!existing || text.length > existing.length) byAsin[asin] = text;
     }
   }
-  return { byAsin, all };
+  return { byAsin, all, altByAsin };
+}
+
+/**
+ * メール本文のリンク文字列は省略表示(末尾が「...」「…」)されることがあるが、同じ
+ * 商品画像のalt属性には完全な商品名が入っている。省略されている名前の先頭部分
+ * (stem)で始まるaltがあれば、それを完全な商品名として採用する。ASINが分かって
+ * いればそのASINの画像のaltの中で最も長いものを、ASIN不明なら全ての画像のaltの
+ * うち一意に決まる場合だけ採用する(曖昧なときは推測せず元の名前のまま)。
+ */
+function extendTruncatedName_(name, asin, altByAsin) {
+  if (!/(\.{2,}|…)\s*$/.test(name)) return name;
+  const stem = name.replace(/(\.{2,}|…)\s*$/, "").trim();
+  if (!stem) return name;
+  const startsWithStem = (alt) => alt.length > stem.length && alt.indexOf(stem) === 0;
+  if (asin && altByAsin[asin]) {
+    const hits = altByAsin[asin].filter(startsWithStem).sort((a, b) => b.length - a.length);
+    if (hits.length > 0) return hits[0];
+  }
+  const pool = [];
+  Object.keys(altByAsin).forEach((k) => altByAsin[k].forEach((a) => pool.push(a)));
+  const unique = Array.from(new Set(pool.filter(startsWithStem)));
+  return unique.length === 1 ? unique[0] : name;
 }
 
 function parseAmazonOrderEmail_(rawInput) {
@@ -490,12 +604,23 @@ function parseAmazonOrderEmail_(rawInput) {
 
   const linkData = extractProductLinkNames_(scopedInput);
   const uniqueLinkNames = Array.from(new Set(linkData.all.map((c) => c.name)));
+
+  // 商品数とASIN数が一致せず1対1で割り当てられなかった場合でも、商品名と同じ文字列の
+  // 商品リンクがあれば、そのリンクのASINを採用できる。
+  items.forEach((item) => {
+    if (item.asin) return;
+    const itemName = item.name.replace(/\s+/g, " ").trim();
+    const hit = linkData.all.find((c) => c.asin && c.name === itemName);
+    if (hit) item.asin = hit.asin;
+  });
+
   items.forEach((item) => {
     if (item.asin && linkData.byAsin[item.asin]) {
       item.name = linkData.byAsin[item.asin];
     } else if (items.length === 1 && uniqueLinkNames.length === 1) {
       item.name = uniqueLinkNames[0];
     }
+    item.name = extendTruncatedName_(item.name, item.asin, linkData.altByAsin);
   });
 
   // 単一商品の注文で、商品欄のカタログ価格と実際の請求合計が大きく異なる場合

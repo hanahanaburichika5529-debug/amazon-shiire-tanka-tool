@@ -486,11 +486,14 @@ function stripHtml(html) {
  * 検出数が商品数とぴったり一致した時だけ、安全に1対1で割り当てる。
  */
 function extractAsinsInOrder(rawInput) {
+  // クリック計測用のリダイレクトURL(.../r.html?...&U=https%3A%2F%2F...%2Fdp%2FASIN)では
+  // 「/」が%2Fにエンコードされているため、そのままでは/dp/に一致しない。
+  const normalized = rawInput.replace(/%2F/gi, "/");
   const re = /(?:\/dp\/|\/gp\/product\/|[?&]asin=)([A-Z0-9]{10})/g;
   const found = [];
   const seen = new Set();
   let m;
-  while ((m = re.exec(rawInput)) !== null) {
+  while ((m = re.exec(normalized)) !== null) {
     if (!seen.has(m[1])) { seen.add(m[1]); found.push(m[1]); }
   }
   return found;
@@ -511,17 +514,29 @@ function extractProductLinkNames(rawInput) {
   const asinRe = /(?:\/dp\/|\/gp\/product\/|[?&]asin=)([A-Z0-9]{10})/i;
   const nonProductTextRe = /^(こちら|詳細|詳細を見る|商品を見る|注文履歴|注文の詳細|配送状況|配送状況を確認|レビュー|レビューを書く|返品|再購入|画像|アカウントサービス|Amazon\.co\.jp)$/i;
   const byAsin = new Map();
+  const altByAsin = new Map(); // 商品画像のalt属性(リンク文字列は省略表示でも、altには完全な商品名が入っている)
   const all = [];
   let m;
   while ((m = linkRe.exec(rawInput)) !== null) {
     const hrefRaw = m[1];
     let hrefDecoded = hrefRaw;
     try { hrefDecoded = decodeURIComponent(hrefRaw); } catch (e) { /* 不正なエンコードはそのまま使う */ }
-    const text = stripHtml(m[2]).replace(/\s+/g, " ").trim();
-    if (text.length < 3 || nonProductTextRe.test(text)) continue;
-
     const asinMatch = hrefDecoded.match(asinRe) || hrefRaw.match(asinRe);
     const asin = asinMatch ? asinMatch[1] : null;
+
+    if (asin) {
+      const imgRe = /<img\b[^>]*\balt="([^"]*)"/gi;
+      let im;
+      while ((im = imgRe.exec(m[2])) !== null) {
+        const alt = stripHtml(im[1]).replace(/\s+/g, " ").trim();
+        if (alt.length < 3 || nonProductTextRe.test(alt)) continue;
+        if (!altByAsin.has(asin)) altByAsin.set(asin, []);
+        altByAsin.get(asin).push(alt);
+      }
+    }
+
+    const text = stripHtml(m[2]).replace(/\s+/g, " ").trim();
+    if (text.length < 3 || nonProductTextRe.test(text)) continue;
 
     all.push({ asin, name: text });
     if (asin) {
@@ -529,7 +544,29 @@ function extractProductLinkNames(rawInput) {
       if (!existing || text.length > existing.length) byAsin.set(asin, text);
     }
   }
-  return { byAsin, all };
+  return { byAsin, all, altByAsin };
+}
+
+/**
+ * メール本文のリンク文字列は省略表示(末尾が「...」「…」)されることがあるが、同じ
+ * 商品画像のalt属性には完全な商品名が入っている。省略されている名前の先頭部分
+ * (stem)で始まるaltがあれば、それを完全な商品名として採用する。ASINが分かって
+ * いればそのASINの画像のaltの中で最も長いものを、ASIN不明なら全ての画像のaltの
+ * うち一意に決まる場合だけ採用する(曖昧なときは推測せず元の名前のまま)。
+ */
+function extendTruncatedName(name, asin, altByAsin) {
+  if (!/(\.{2,}|…)\s*$/.test(name)) return name;
+  const stem = name.replace(/(\.{2,}|…)\s*$/, "").trim();
+  if (!stem) return name;
+  const startsWithStem = (alt) => alt.length > stem.length && alt.startsWith(stem);
+  if (asin && altByAsin.has(asin)) {
+    const hits = altByAsin.get(asin).filter(startsWithStem).sort((a, b) => b.length - a.length);
+    if (hits.length > 0) return hits[0];
+  }
+  const pool = [];
+  altByAsin.forEach((alts) => alts.forEach((a) => pool.push(a)));
+  const unique = Array.from(new Set(pool.filter(startsWithStem)));
+  return unique.length === 1 ? unique[0] : name;
 }
 
 /**
@@ -686,14 +723,25 @@ function parseAmazonOrderEmail(rawInput) {
   // 確実なのでそちらを優先する(テーブルレイアウトの崩れ等で誤った文字列を
   // 拾ってしまうケースへの対策)。ASINで紐付けられない場合でも、商品が
   // 1件だけの注文でリンクの候補も1件だけに絞れるなら、それを使う。
-  const { byAsin: linkNamesByAsin, all: linkNameCandidates } = extractProductLinkNames(scopedInput);
+  const { byAsin: linkNamesByAsin, all: linkNameCandidates, altByAsin } = extractProductLinkNames(scopedInput);
   const uniqueLinkNames = Array.from(new Set(linkNameCandidates.map((c) => c.name)));
+
+  // 商品数とASIN数が一致せず1対1で割り当てられなかった場合でも、商品名と同じ文字列の
+  // 商品リンクがあれば、そのリンクのASINを採用できる。
+  items.forEach((item) => {
+    if (item.asin) return;
+    const itemName = item.name.replace(/\s+/g, " ").trim();
+    const hit = linkNameCandidates.find((c) => c.asin && c.name === itemName);
+    if (hit) item.asin = hit.asin;
+  });
+
   items.forEach((item) => {
     if (item.asin && linkNamesByAsin.has(item.asin)) {
       item.name = linkNamesByAsin.get(item.asin);
     } else if (items.length === 1 && uniqueLinkNames.length === 1) {
       item.name = uniqueLinkNames[0];
     }
+    item.name = extendTruncatedName(item.name, item.asin, altByAsin);
   });
 
   // 単一商品の注文で、商品欄に表示される価格(カタログ価格)と実際の請求合計が
@@ -1453,6 +1501,82 @@ function pickBestBulkCandidates(results) {
  * どのメールを処理済みとしたかはアカウントごとにローカルへ記録し、次回以降は
  * 同じメールを再取得・重複保存しないようにする。
  */
+function calcRecordAmount(item, parsed) {
+  const isUnitPrice = inferIsUnitPrice(item, parsed.orderTotal);
+  return isUnitPrice ? item.price * item.quantity : item.price;
+}
+
+/**
+ * 商品名の照合用の正規化(全角半角の統一・空白の圧縮・末尾の省略記号の除去・小文字化)。
+ * メール由来の名前は途中で「...」「…」と省略されていることがあるため、省略記号を
+ * 除いた先頭部分どうしの前方一致で同じ商品かを判定する。
+ */
+function normalizeNameForMatch(name) {
+  return String(name || "").normalize("NFKC").replace(/\s+/g, " ").trim().replace(/\.{2,}$/, "").trim().toLowerCase();
+}
+
+/**
+ * 既存の記録行(rec)が、同じ注文の同じ商品(item)かどうか。ASINが両方あればASINの一致で、
+ * どちらかが無ければ名前(省略表示を考慮した前方一致)で判定する。
+ */
+function isSameOrderItem(rec, orderNumber, item) {
+  if (!rec.orderNumber || rec.orderNumber !== orderNumber) return false;
+  if (rec.asin && item.asin) return rec.asin === item.asin;
+  const a = normalizeNameForMatch(rec.name);
+  const b = normalizeNameForMatch(item.name);
+  if (!a || !b) return false;
+  if (a === b) return true;
+  const shorter = a.length <= b.length ? a : b;
+  const longer = a.length <= b.length ? b : a;
+  return shorter.length >= 6 && longer.indexOf(shorter) === 0;
+}
+
+/**
+ * 保存済みの記録から、今回の商品に対応する行を探す。複数の行が該当する場合は数量と金額で
+ * 絞り込み、それでも1行に決まらなければ「曖昧」として、誤った行の更新も二重保存も避ける。
+ * 同じ行を2つの商品が取り合わないよう、claimedRows(使用済みの行番号)を除外する。
+ */
+function findMatchingRecord(records, orderNumber, item, claimedRows, amount) {
+  if (!orderNumber) return { record: null, ambiguous: false };
+  const matches = records.filter((r) => !claimedRows.has(r.rowNumber) && isSameOrderItem(r, orderNumber, item));
+  if (matches.length <= 1) return { record: matches[0] || null, ambiguous: false };
+  const narrowed = matches.filter((r) => r.quantity === item.quantity && Math.abs(r.amount - amount) < 1);
+  if (narrowed.length === 1) return { record: narrowed[0], ambiguous: false };
+  return { record: null, ambiguous: true };
+}
+
+/**
+ * 既存の行に足りない情報(ASIN、省略されていた商品名の続き)を今回の解析結果で補う。
+ * 補うべき変更が無ければnullを返す。
+ */
+function buildRecordBackfill(rec, item) {
+  const asin = rec.asin || item.asin || "";
+  let name = rec.name;
+  if (/(\.{2,}|…)\s*$/.test(rec.name) && item.name.length > rec.name.length) {
+    const a = normalizeNameForMatch(rec.name);
+    if (a && normalizeNameForMatch(item.name).indexOf(a) === 0) name = item.name;
+  }
+  if (asin === (rec.asin || "") && name === rec.name) return null;
+  return { name, asin };
+}
+
+/** 記録のB列(商品名)とC列(ASIN)だけを、行番号を指定してまとめて更新する。 */
+async function updatePurchaseRecordFields(updates, token, email) {
+  if (updates.length === 0) return;
+  const sheetId = await ensurePurchaseSheet(token, email);
+  const res = await googleFetch(`https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values:batchUpdate`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      valueInputOption: "RAW",
+      data: updates.map((u) => ({ range: `${SHEET_TAB}!B${u.rowNumber}:C${u.rowNumber}`, values: [[u.name, u.asin]] })),
+    }),
+  }, token);
+  const json = await res.json();
+  if (!res.ok) throw new Error((json.error && json.error.message) || "記録の更新に失敗しました");
+  delete cachedRecordsByEmail[email];
+}
+
 async function saveBulkCandidate(item, parsed, dateStr, token, email) {
   const isUnitPrice = inferIsUnitPrice(item, parsed.orderTotal);
   const unitPrice = isUnitPrice ? item.price : item.price / (item.quantity || 1);
@@ -1523,12 +1647,29 @@ async function runBulkFetch() {
     // 優先して1件だけ保存する(pickBestBulkCandidatesのコメントを参照)。
     const { byKey, noKeyRows, cancelledOrderNumbers } = pickBestBulkCandidates(fetchResults);
     let savedItems = 0;
+    let backfilledCount = 0;
+    const claimedRows = new Set();
+    const rowUpdates = [];
     $("bulkStatus").textContent = "保存中…";
     for (const [key, cand] of byKey) {
       if (savedOrderKeys.has(key)) continue;
       savedOrderKeys.add(key);
+      // 以前の保存分はASINが空で名前が途中で切れていることがあり、キーが一致しない。
+      // 同じ注文の同じ商品が保存済みなら、二重に保存せず足りない情報だけを補う。
+      const match = findMatchingRecord(existingRecords, cand.parsed.orderNumber, cand.item, claimedRows, calcRecordAmount(cand.item, cand.parsed));
+      if (match.ambiguous) continue;
+      if (match.record) {
+        claimedRows.add(match.record.rowNumber);
+        const fields = buildRecordBackfill(match.record, cand.item);
+        if (fields) rowUpdates.push({ rowNumber: match.record.rowNumber, ...fields });
+        continue;
+      }
       await saveBulkCandidate(cand.item, cand.parsed, cand.dateStr, token, email);
       savedItems++;
+    }
+    if (rowUpdates.length > 0) {
+      await updatePurchaseRecordFields(rowUpdates, token, email);
+      backfilledCount = rowUpdates.length;
     }
     for (const cand of noKeyRows) {
       await saveBulkCandidate(cand.item, cand.parsed, cand.dateStr, token, email);
@@ -1559,6 +1700,7 @@ async function runBulkFetch() {
     });
 
     $("bulkStatus").textContent = `完了: 新規${newIds.length}件を確認し、${savedItems}件の商品を記録に保存しました（${skippedCount}件はキャンセル等のためスキップ）。`
+      + (backfilledCount > 0 ? ` 既存の記録${backfilledCount}件のASIN・商品名を補完しました。` : "")
       + (removedForCancellation > 0 ? ` キャンセル確認により既存の記録${removedForCancellation}件を削除しました。` : "");
     renderBulkHistory(email);
   } catch (e) {
