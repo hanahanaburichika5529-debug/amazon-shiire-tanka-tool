@@ -1924,7 +1924,7 @@ function renderProductMaster() {
       <tbody>${list.map((entry, idx) => `
         <tr>
           <td>${escapeHtml(entry.canonical)}</td>
-          <td>${escapeHtml(entry.keyword)}</td>
+          <td>${escapeHtml(entry.keyword || "")}${entry.asins && entry.asins.length ? `<br><small>ASIN: ${escapeHtml(entry.asins.join(", "))}</small>` : ""}</td>
           <td><button type="button" class="btn btn--danger" data-action="delete-master" data-idx="${idx}">削除</button></td>
         </tr>
       `).join("")}</tbody>
@@ -2327,6 +2327,733 @@ function attachInputEvents() {
   });
 }
 
+/* ================================================================
+ * 在庫リセット判定（プライスターの在庫CSV・販売CSV）
+ * 仕様: docs/specs/stock-zero-reset-spec.md
+ * CSVはブラウザ内でのみ処理し、外部へは送信しない。
+ * ================================================================ */
+
+const STOCK_RESET_DATES_KEY = "ppcalc_resetDates";
+const STOCK_SNAPSHOTS_KEY = "ppcalc_stockSnapshots";
+const STOCK_AUTODELETE_KEY = "ppcalc_stockAutoDelete";
+const STOCK_AUTODELETE_CONFIRMED_KEY = "ppcalc_stockAutoDeleteConfirmed";
+const STOCK_RETENTION_DAYS = 90;
+const STOCK_STOCK_FILE_RE = /^editUploadProduct_FBA.*\.csv$/i;
+const STOCK_ORDERS_FILE_RE = /^orders_.*\.csv$/i;
+const STOCK_SOURCE_LABELS = {
+  lastSale: "最終販売日",
+  rangeStart: "販売CSVの期間開始日（3か月以上販売なし・近似）",
+  manual: "手動指定",
+};
+
+function readJsonStorage(key, fallback) {
+  try {
+    const v = JSON.parse(localStorage.getItem(key));
+    return v === null || v === undefined ? fallback : v;
+  } catch (e) { return fallback; }
+}
+
+function localDateStr(d) {
+  const p = (n) => String(n).padStart(2, "0");
+  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())}`;
+}
+
+function shiftDateStr(dateStr, days) {
+  const [y, m, d] = dateStr.split("-").map(Number);
+  return localDateStr(new Date(y, m - 1, d + days));
+}
+
+/* ---------------- CSVの読み取り ---------------- */
+
+/** UTF-8として読めなければShift-JIS(Windows-31J)として読む。プライスターのCSVは通常Shift-JIS。 */
+function decodeCsvBytes(buf) {
+  try {
+    return new TextDecoder("utf-8", { fatal: true }).decode(buf);
+  } catch (e) {
+    return new TextDecoder("shift_jis").decode(buf);
+  }
+}
+
+/**
+ * 最小限のCSVパーサ（ダブルクォート囲み・クォート内の改行/カンマ・""のエスケープに対応）。
+ * プライスターのCSVは SKU/ASIN/title 等が Excel の文字列式 ="..." で書かれているため、
+ * 「=」の直後のクォートも通常のクォートとして扱い、「="」「"」を取り除いた中身だけを返す。
+ */
+function parseCsvText(text) {
+  const rows = [];
+  let row = [], field = "", inQuotes = false;
+  const src = text.replace(/^﻿/, "");
+  const pushRow = () => {
+    row.push(field);
+    field = "";
+    if (row.length > 1 || row[0] !== "") rows.push(row);
+    row = [];
+  };
+  for (let i = 0; i < src.length; i++) {
+    const ch = src[i];
+    if (inQuotes) {
+      if (ch === '"') {
+        if (src[i + 1] === '"') { field += '"'; i++; } else { inQuotes = false; }
+      } else {
+        field += ch;
+      }
+    } else if (ch === '"' && (field === "" || field === "=")) {
+      inQuotes = true;
+      field = "";
+    } else if (ch === ",") {
+      row.push(field);
+      field = "";
+    } else if (ch === "\n" || ch === "\r") {
+      if (ch === "\r" && src[i + 1] === "\n") i++;
+      pushRow();
+    } else {
+      field += ch;
+    }
+  }
+  if (field !== "" || row.length > 0) pushRow();
+  return rows;
+}
+
+/** ヘッダー行から、在庫CSV("stock")か販売CSV("orders")かを判定する。どちらでもなければnull。 */
+function detectCsvKind(headerRow) {
+  const h = headerRow.map((c) => String(c).trim());
+  if (h.includes("number") && h.includes("cost") && h.includes("ASIN") && h.includes("SKU")) return "stock";
+  if (h.includes("AmazonOrderId") && h.includes("注文日") && h.includes("ASIN")) return "orders";
+  return null;
+}
+
+function csvColumnIndexes(headerRow, names, label) {
+  const h = headerRow.map((c) => String(c).trim());
+  const idx = {};
+  const missing = [];
+  names.forEach((n) => { idx[n] = h.indexOf(n); if (idx[n] < 0) missing.push(n); });
+  if (missing.length > 0) throw new Error(`${label}に必要な列が見つかりません: ${missing.join(", ")}`);
+  return idx;
+}
+
+/** 在庫CSV → [{ sku, asin, title, stock, cost }] */
+function parseStockCsv(rows) {
+  const idx = csvColumnIndexes(rows[0], ["SKU", "ASIN", "title", "number", "cost"], "在庫CSV");
+  return rows.slice(1)
+    .filter((r) => r.length > idx.number && r[idx.ASIN])
+    .map((r) => ({
+      sku: r[idx.SKU],
+      asin: r[idx.ASIN],
+      title: r[idx.title] || "",
+      stock: parseInt(r[idx.number], 10) || 0,
+      cost: r[idx.cost] === "" || r[idx.cost] === undefined ? null : (parseInt(r[idx.cost], 10) || 0),
+    }));
+}
+
+/**
+ * 販売CSV → { orders:[{ date, name, asin, sku, status }], minDate, maxDate }
+ * 顧客の注文番号(AmazonOrderId)は読み飛ばし、保持しない。
+ */
+function parseOrdersCsv(rows) {
+  const idx = csvColumnIndexes(rows[0], ["注文日", "商品名", "ASIN", "SKU", "出荷状態"], "販売CSV");
+  const orders = rows.slice(1)
+    .filter((r) => r.length > idx["出荷状態"] && r[idx.ASIN] && r[idx["注文日"]])
+    .map((r) => ({
+      date: r[idx["注文日"]].slice(0, 10),
+      name: r[idx["商品名"]] || "",
+      asin: r[idx.ASIN],
+      sku: r[idx.SKU] || "",
+      status: r[idx["出荷状態"]] || "",
+    }));
+  const dates = orders.map((o) => o.date).sort();
+  return { orders, minDate: dates[0] || null, maxDate: dates[dates.length - 1] || null };
+}
+
+/* ---------------- 仕入れ記録 → プライスター商品(ASIN)の紐付け ---------------- */
+
+/**
+ * ASIN完全一致 → 商品マスタ(キーワード+ASIN登録) → 名前(省略表示を考慮した前方一致)の順に探す。
+ * 名前で複数候補になる場合は推測せず "ambiguous" を返す。
+ */
+function linkRecordToProduct(rec, productList, master) {
+  if (rec.asin) {
+    const p = productList.find((x) => x.asin === rec.asin);
+    if (p) return { asin: p.asin, method: "ASIN", candidates: [] };
+  }
+  for (const e of master) {
+    if (!e.keyword || !e.asins || e.asins.length === 0 || !rec.name.includes(e.keyword)) continue;
+    const hit = e.asins.find((a) => productList.some((p) => p.asin === a));
+    if (hit) return { asin: hit, method: "マスタ", candidates: [] };
+  }
+  const nr = normalizeNameForMatch(rec.name);
+  if (nr.length >= 6) {
+    const cands = productList.filter((p) => {
+      const t = normalizeNameForMatch(p.title);
+      if (!t) return false;
+      return t === nr || t.indexOf(nr) === 0 || (t.length >= 6 && nr.indexOf(t) === 0);
+    });
+    if (cands.length === 1) return { asin: cands[0].asin, method: "名前", candidates: [] };
+    if (cands.length > 1) return { asin: null, method: "ambiguous", candidates: cands.map((c) => c.asin) };
+  }
+  return { asin: null, method: "none", candidates: [] };
+}
+
+/* ---------------- リセット判定 ---------------- */
+
+/**
+ * 在庫CSV・販売CSV・仕入れ記録から、商品(ASIN)ごとの状態と「現行ロット」の加重平均単価を求める。
+ * 副作用は無く、保存すべきリセット日は resetUpdates として返す。
+ *   stockRows: parseStockCsv の結果 / ordersInfo: parseOrdersCsv の結果(未読込ならnull)
+ *   opts: { includePending, missingAsZero, threshold }
+ */
+function buildStockResetView({ stockRows, ordersInfo, records, master, resetDates, opts }) {
+  const products = new Map();
+  const ensure = (asin, title) => {
+    if (!products.has(asin)) products.set(asin, { asin, title: title || "", skus: [], stockTotal: 0, inStockCsv: false, lastSaleDate: null });
+    return products.get(asin);
+  };
+  stockRows.forEach((r) => {
+    const p = ensure(r.asin, r.title);
+    if (!p.title) p.title = r.title;
+    p.skus.push({ sku: r.sku, stock: r.stock, cost: r.cost });
+    p.stockTotal += r.stock;
+    p.inStockCsv = true;
+  });
+  const ordersLoaded = !!ordersInfo;
+  if (ordersLoaded) {
+    ordersInfo.orders.forEach((o) => {
+      const p = ensure(o.asin, o.name);
+      if (!p.title) p.title = o.name;
+      const status = String(o.status || "");
+      if (/cancel/i.test(status)) return;
+      if (!opts.includePending && /pending/i.test(status)) return;
+      if (!p.lastSaleDate || o.date > p.lastSaleDate) p.lastSaleDate = o.date;
+    });
+  }
+  const productList = Array.from(products.values());
+
+  const linkedByAsin = new Map();
+  const unresolved = new Map();
+  const methodCounts = {};
+  records.forEach((rec) => {
+    const link = linkRecordToProduct(rec, productList, master);
+    methodCounts[link.method] = (methodCounts[link.method] || 0) + 1;
+    if (link.asin) {
+      if (!linkedByAsin.has(link.asin)) linkedByAsin.set(link.asin, []);
+      linkedByAsin.get(link.asin).push(rec);
+    } else {
+      if (!unresolved.has(rec.name)) unresolved.set(rec.name, { name: rec.name, count: 0, candidates: link.candidates, method: link.method, sampleOrder: rec.orderNumber || "" });
+      unresolved.get(rec.name).count++;
+    }
+  });
+
+  const resetUpdates = {};
+  const rows = productList.map((p) => {
+    const persisted = resetDates[p.asin] || null;
+    const missing = !p.inStockCsv;
+    const zeroLike = missing ? !!opts.missingAsZero : p.stockTotal === 0;
+    let status, resetDate = null, source = null;
+
+    if (persisted && persisted.source === "manual") {
+      resetDate = persisted.resetDate; source = "manual";
+      status = zeroLike ? (missing ? "missing_zero" : "zero_reset") : (missing ? "missing_keep" : "continue");
+    } else if (!zeroLike) {
+      status = missing ? "missing_keep" : "continue";
+      if (persisted) { resetDate = persisted.resetDate; source = persisted.source; }
+    } else if (ordersLoaded) {
+      if (p.lastSaleDate) {
+        resetDate = p.lastSaleDate; source = "lastSale";
+        status = missing ? "missing_zero" : "zero_reset";
+      } else {
+        if (persisted) { resetDate = persisted.resetDate; source = persisted.source; }
+        else { resetDate = ordersInfo.minDate; source = "rangeStart"; }
+        status = missing ? "missing_zero" : "zero_outofrange";
+      }
+      if (resetDate && (!persisted || persisted.resetDate !== resetDate || persisted.source !== source)) {
+        resetUpdates[p.asin] = { resetDate, source };
+      }
+    } else if (persisted) {
+      resetDate = persisted.resetDate; source = persisted.source;
+      status = missing ? "missing_zero" : "zero_reset";
+    } else {
+      status = missing ? "missing_zero" : "zero_unknown";
+    }
+
+    const linked = linkedByAsin.get(p.asin) || [];
+    const previewRecords = linked
+      .map((rec) => ({ ...rec, included: !resetDate || String(rec.date).slice(0, 10) >= resetDate }))
+      .sort((a, b) => String(b.date).localeCompare(String(a.date)));
+    const lot = previewRecords.filter((r) => r.included);
+    const lotQty = lot.reduce((s, r) => s + r.quantity, 0);
+    const lotAmount = lot.reduce((s, r) => s + r.amount, 0);
+    const allQty = linked.reduce((s, r) => s + r.quantity, 0);
+    const allAmount = linked.reduce((s, r) => s + r.amount, 0);
+    const avg = lotQty > 0 ? lotAmount / lotQty : null;
+    const referenceAvg = allQty > 0 ? allAmount / allQty : null;
+    const costs = Array.from(new Set(p.skus.map((s) => s.cost).filter((c) => c !== null && c !== undefined)));
+    const needsUpdate = avg !== null && costs.some((c) => Math.abs(Math.round(avg) - c) >= opts.threshold);
+
+    return {
+      asin: p.asin, title: p.title, skus: p.skus, stockTotal: p.stockTotal, inStockCsv: p.inStockCsv,
+      status, resetDate, source, lastSaleDate: p.lastSaleDate,
+      lotQty, lotAmount, avg, referenceAvg, costs, needsUpdate, records: previewRecords,
+    };
+  });
+
+  const zeroStatuses = ["zero_reset", "zero_outofrange", "zero_unknown", "missing_zero"];
+  const summary = {
+    productCount: rows.length,
+    zeroCount: rows.filter((r) => zeroStatuses.includes(r.status)).length,
+    recordCount: records.length,
+    methodCounts,
+    unresolvedCount: unresolved.size,
+  };
+  return { rows, unresolved: Array.from(unresolved.values()), summary, resetUpdates };
+}
+
+/* ---------------- 保存データ(リセット日・在庫履歴)と90日の自動削除 ---------------- */
+
+function getResetDates() { return readJsonStorage(STOCK_RESET_DATES_KEY, {}); }
+function saveResetDates(obj) { localStorage.setItem(STOCK_RESET_DATES_KEY, JSON.stringify(obj)); }
+
+/** 90日を過ぎた在庫スナップショットを削除する。削除した件数を返す。 */
+function purgeOldSnapshots(todayStr) {
+  const list = readJsonStorage(STOCK_SNAPSHOTS_KEY, []);
+  const cutoff = shiftDateStr(todayStr, -STOCK_RETENTION_DAYS);
+  const kept = list.filter((s) => s.date >= cutoff);
+  if (kept.length !== list.length) localStorage.setItem(STOCK_SNAPSHOTS_KEY, JSON.stringify(kept));
+  return list.length - kept.length;
+}
+
+function recordStockSnapshot(stockRows, todayStr) {
+  purgeOldSnapshots(todayStr);
+  const list = readJsonStorage(STOCK_SNAPSHOTS_KEY, []).filter((s) => s.date !== todayStr);
+  list.push({ date: todayStr, items: stockRows.map((r) => ({ asin: r.asin, sku: r.sku, stock: r.stock, cost: r.cost })) });
+  localStorage.setItem(STOCK_SNAPSHOTS_KEY, JSON.stringify(list));
+}
+
+function isStockAutoDeleteOn() { return localStorage.getItem(STOCK_AUTODELETE_KEY) === "on"; }
+
+/* ---------------- PC専用フォルダ(File System Access API) ---------------- */
+
+const STOCK_IDB_NAME = "ppcalc_stock";
+const STOCK_IDB_STORE = "handles";
+const STOCK_IDB_KEY = "stockFolder";
+let stockDirHandle = null;
+
+function stockFolderSupported() { return typeof window.showDirectoryPicker === "function"; }
+
+function stockIdb() {
+  return new Promise((resolve, reject) => {
+    const req = indexedDB.open(STOCK_IDB_NAME, 1);
+    req.onupgradeneeded = () => req.result.createObjectStore(STOCK_IDB_STORE);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function stockIdbSet(value) {
+  try {
+    const db = await stockIdb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STOCK_IDB_STORE, "readwrite");
+      tx.objectStore(STOCK_IDB_STORE).put(value, STOCK_IDB_KEY);
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+  } catch (e) { /* 保存できない環境では、このページを開いている間だけ覚える */ }
+}
+async function stockIdbGet() {
+  try {
+    const db = await stockIdb();
+    return await new Promise((resolve, reject) => {
+      const req = db.transaction(STOCK_IDB_STORE, "readonly").objectStore(STOCK_IDB_STORE).get(STOCK_IDB_KEY);
+      req.onsuccess = () => resolve(req.result || null); req.onerror = () => reject(req.error);
+    });
+  } catch (e) { return null; }
+}
+async function stockIdbClear() {
+  try {
+    const db = await stockIdb();
+    await new Promise((resolve, reject) => {
+      const tx = db.transaction(STOCK_IDB_STORE, "readwrite");
+      tx.objectStore(STOCK_IDB_STORE).delete(STOCK_IDB_KEY);
+      tx.oncomplete = resolve; tx.onerror = () => reject(tx.error);
+    });
+  } catch (e) { /* 無視 */ }
+}
+
+async function ensureFolderPermission(handle, mode) {
+  if (typeof handle.queryPermission !== "function") return true;
+  if ((await handle.queryPermission({ mode })) === "granted") return true;
+  return (await handle.requestPermission({ mode })) === "granted";
+}
+
+/** 専用フォルダ内の在庫CSV・販売CSVを、それぞれ更新日時が最新の1件ずつ選ぶ。他のファイルは読まない。 */
+async function listStockFolderCsvs(dirHandle) {
+  const all = [];
+  for await (const entry of dirHandle.values()) {
+    if (entry.kind !== "file") continue;
+    const kind = STOCK_STOCK_FILE_RE.test(entry.name) ? "stock" : (STOCK_ORDERS_FILE_RE.test(entry.name) ? "orders" : null);
+    if (!kind) continue;
+    const file = await entry.getFile();
+    all.push({ kind, name: entry.name, lastModified: file.lastModified, file });
+  }
+  const newest = (kind) => all.filter((f) => f.kind === kind).sort((a, b) => b.lastModified - a.lastModified)[0] || null;
+  return { stock: newest("stock"), orders: newest("orders"), all };
+}
+
+/** 90日より古いCSV（各種類の最新1件は除く）を選び出す。 */
+function selectOldCsvsToDelete(listing, nowMs) {
+  const cutoff = nowMs - STOCK_RETENTION_DAYS * 86400000;
+  const keep = new Set([listing.stock && listing.stock.name, listing.orders && listing.orders.name]);
+  return listing.all.filter((f) => !keep.has(f.name) && f.lastModified < cutoff);
+}
+
+async function deleteOldCsvsInFolder(dirHandle, listing, nowMs) {
+  const victims = selectOldCsvsToDelete(listing, nowMs);
+  if (victims.length === 0) return 0;
+  if (typeof dirHandle.removeEntry !== "function") return 0;
+  if (!await ensureFolderPermission(dirHandle, "readwrite")) return 0;
+  if (localStorage.getItem(STOCK_AUTODELETE_CONFIRMED_KEY) !== "yes") {
+    const ok = window.confirm(`次の古いCSV（${STOCK_RETENTION_DAYS}日より前）を専用フォルダから削除します。\n\n${victims.map((v) => "・" + v.name).join("\n")}\n\n以後は確認なしで自動削除してよろしいですか？`);
+    if (!ok) return 0;
+    localStorage.setItem(STOCK_AUTODELETE_CONFIRMED_KEY, "yes");
+  }
+  let deleted = 0;
+  for (const v of victims) {
+    try { await dirHandle.removeEntry(v.name); deleted++; } catch (e) { /* 削除できなかったファイルはそのまま */ }
+  }
+  return deleted;
+}
+
+/* ---------------- 画面 ---------------- */
+
+const STOCK_STATUS_LABELS = {
+  continue: "継続",
+  zero_reset: "在庫0・リセット",
+  zero_outofrange: "在庫0・範囲外",
+  zero_unknown: "在庫0・日付不明",
+  missing_zero: "出品情報なし（ゼロ扱い）",
+  missing_keep: "出品情報なし（継続）",
+};
+
+const stockState = { stockRows: null, stockFileName: "", ordersInfo: null, ordersFileName: "" };
+let stockView = null;
+let stockRecordsCache = [];
+const stockOpenPreview = new Set();
+
+function readStockOpts() {
+  return {
+    includePending: $("stockIncludePending").checked,
+    missingAsZero: $("stockMissingAsZero").checked,
+    threshold: Math.max(0, parseFloat($("stockThreshold").value) || 0),
+  };
+}
+
+/** 記録名から商品マスタ用のキーワード(省略記号を除いた先頭部分)を作る。 */
+function stockKeywordFromName(name) {
+  const stem = String(name).replace(/(\.{2,}|…)\s*$/, "").trim();
+  return stem || String(name);
+}
+
+function addProductMasterAsinEntry(canonical, keyword, asin) {
+  const list = getProductMaster();
+  const existing = list.find((e) => e.keyword === keyword);
+  if (existing) {
+    existing.asins = Array.from(new Set([...(existing.asins || []), asin]));
+    if (!existing.canonical) existing.canonical = canonical;
+  } else {
+    list.push({ canonical, keyword, asins: [asin] });
+  }
+  saveProductMaster(list);
+}
+
+async function readOneStockCsv(file) {
+  const rows = parseCsvText(decodeCsvBytes(await file.arrayBuffer()));
+  if (rows.length === 0) throw new Error("空のファイルです");
+  const kind = detectCsvKind(rows[0]);
+  if (kind === "stock") {
+    stockState.stockRows = parseStockCsv(rows);
+    stockState.stockFileName = file.name;
+  } else if (kind === "orders") {
+    stockState.ordersInfo = parseOrdersCsv(rows);
+    stockState.ordersFileName = file.name;
+  } else {
+    throw new Error("在庫CSV・販売CSVのどちらでもないようです（ヘッダー行を確認できませんでした）");
+  }
+  return kind;
+}
+
+/** 渡されたCSV(複数可)を種類・文字コードを自動判定して読み込み、判定結果を表示する。 */
+async function ingestStockCsvFiles(files) {
+  const errors = [];
+  const sorted = files.slice().sort((a, b) => (a.lastModified || 0) - (b.lastModified || 0));
+  for (const f of sorted) {
+    try { await readOneStockCsv(f); } catch (e) { errors.push(`${f.name}: ${e.message}`); }
+  }
+  if (stockState.stockRows) recordStockSnapshot(stockState.stockRows, localDateStr(new Date()));
+  const loaded = [];
+  if (stockState.stockRows) loaded.push(`在庫CSV「${stockState.stockFileName}」（${stockState.stockRows.length}行）`);
+  if (stockState.ordersInfo) loaded.push(`販売CSV「${stockState.ordersFileName}」（${stockState.ordersInfo.orders.length}件、${stockState.ordersInfo.minDate || "?"}〜${stockState.ordersInfo.maxDate || "?"}）`);
+  $("stockStatus").textContent = (loaded.length ? "読み込みました: " + loaded.join(" / ") : "") + (errors.length ? (loaded.length ? " ／ " : "") + "読み込めなかったファイル: " + errors.join(" / ") : "");
+  await refreshStockView(true);
+}
+
+async function loadStockFromFolder(forcePick) {
+  $("stockStatus").textContent = "フォルダを確認中…";
+  try {
+    const mode = isStockAutoDeleteOn() ? "readwrite" : "read";
+    let handle = forcePick ? null : (stockDirHandle || await stockIdbGet());
+    if (!handle) {
+      handle = await window.showDirectoryPicker({ id: "pricetar-csv", mode });
+      await stockIdbSet(handle);
+    } else if (!await ensureFolderPermission(handle, mode)) {
+      throw new Error("フォルダへのアクセスが許可されませんでした。もう一度「フォルダを読み込む」を押して許可してください。");
+    }
+    stockDirHandle = handle;
+    const listing = await listStockFolderCsvs(handle);
+    const targets = [listing.stock, listing.orders].filter(Boolean).map((f) => f.file);
+    if (targets.length === 0) {
+      $("stockStatus").textContent = "専用フォルダに在庫CSV（editUploadProduct_FBA*.csv）も販売CSV（orders_*.csv）も見つかりませんでした。";
+      return;
+    }
+    await ingestStockCsvFiles(targets);
+    let note = "";
+    if (isStockAutoDeleteOn()) {
+      const deleted = await deleteOldCsvsInFolder(handle, listing, Date.now());
+      if (deleted > 0) note = ` ${deleted}件の古いCSVを削除しました。`;
+    }
+    $("stockStatus").textContent += note;
+  } catch (e) {
+    $("stockStatus").textContent = e && e.name === "AbortError" ? "フォルダの選択をキャンセルしました。" : "エラー: " + (e && e.message ? e.message : e);
+  }
+}
+
+async function refreshStockView(persistUpdates) {
+  if (!stockState.stockRows) {
+    $("stockSummary").textContent = stockState.ordersInfo ? "販売CSVを読み込みました。判定には在庫CSV（editUploadProduct_FBA）も必要です。" : "";
+    $("stockTable").hidden = true;
+    $("stockFilters").hidden = true;
+    $("stockAmbiguous").innerHTML = "";
+    return;
+  }
+  let note = "";
+  stockRecordsCache = [];
+  if (Object.keys(connectedAccounts).length > 0) {
+    try { stockRecordsCache = await fetchAllAccountsPurchaseRecords(false); }
+    catch (e) { note = "仕入れ記録を読み込めませんでした: " + e.message; }
+  } else {
+    note = "Googleアカウントが未連携のため、仕入れ単価は計算していません（在庫の状態のみ表示）。";
+  }
+  renderStockView(persistUpdates, note);
+}
+
+function renderStockView(persistUpdates, note) {
+  if (!stockState.stockRows) return;
+  const view = buildStockResetView({
+    stockRows: stockState.stockRows,
+    ordersInfo: stockState.ordersInfo,
+    records: stockRecordsCache,
+    master: getProductMaster(),
+    resetDates: getResetDates(),
+    opts: readStockOpts(),
+  });
+  if (persistUpdates && Object.keys(view.resetUpdates).length > 0) {
+    const dates = getResetDates();
+    const now = new Date().toISOString();
+    Object.entries(view.resetUpdates).forEach(([asin, u]) => { dates[asin] = { ...u, decidedAt: now }; });
+    saveResetDates(dates);
+  }
+  stockView = view;
+  const s = view.summary;
+  const mc = s.methodCounts;
+  $("stockSummary").textContent = `商品 ${s.productCount}件（在庫0: ${s.zeroCount}件）／ 仕入れ記録 ${s.recordCount}件 `
+    + `（ASIN一致 ${mc["ASIN"] || 0} ・マスタ ${mc["マスタ"] || 0} ・名前 ${mc["名前"] || 0} ・要確認 ${mc["ambiguous"] || 0} ・未紐付け ${mc["none"] || 0}）`
+    + (stockState.ordersInfo ? "" : " ／ 販売CSV未読込のため、在庫0の商品は最終販売日を判定できません。")
+    + (note ? " ／ " + note : "");
+  $("stockFilters").hidden = false;
+  renderStockAmbiguous(view);
+  renderStockTable(view);
+}
+
+function renderStockAmbiguous(view) {
+  const el = $("stockAmbiguous");
+  if (view.unresolved.length === 0) { el.innerHTML = ""; return; }
+  const groups = view.unresolved.slice().sort((a, b) => b.count - a.count).slice(0, 30);
+  const titleOf = (asin) => (view.rows.find((r) => r.asin === asin) || { title: asin }).title;
+  const allOptions = view.rows.map((r) => `<option value="${escapeHtml(r.asin)}">${escapeHtml(r.title.slice(0, 60))}（${escapeHtml(r.asin)}）</option>`).join("");
+  el.innerHTML = `
+    <h3>商品の紐付けが必要な記録（${view.unresolved.length}件）</h3>
+    <p class="hint">仕入れ記録の商品名からプライスターの商品を一意に決められなかったものです。該当する商品を選んで登録すると、同じ名前の記録はすべてその商品として扱われます（商品マスタに保存されます）。</p>
+    ${groups.map((g, i) => `
+      <div class="stock-ambiguous-row" data-idx="${i}">
+        <span>${escapeHtml(g.name)}（${g.count}件）${g.sampleOrder ? ` <a href="${amazonOrderDetailsUrl(g.sampleOrder)}" target="_blank" rel="noopener">Amazonで確認</a>` : ""}</span>
+        <select data-role="link-select">
+          ${g.candidates.length ? `<optgroup label="候補">${g.candidates.map((a) => `<option value="${escapeHtml(a)}">${escapeHtml(titleOf(a).slice(0, 60))}（${escapeHtml(a)}）</option>`).join("")}</optgroup>` : ""}
+          <optgroup label="すべての商品">${allOptions}</optgroup>
+        </select>
+        <button type="button" class="btn" data-action="register-link" data-name="${escapeHtml(g.name)}">この商品として登録</button>
+      </div>`).join("")}
+    ${view.unresolved.length > groups.length ? `<p class="hint">ほか ${view.unresolved.length - groups.length}件は省略しています（件数の多い順に表示）。</p>` : ""}
+  `;
+}
+
+function renderStockTable(view) {
+  const table = $("stockTable");
+  const onlyUpdate = $("stockOnlyUpdate").checked;
+  const onlyZero = $("stockOnlyZero").checked;
+  const zeroStatuses = ["zero_reset", "zero_outofrange", "zero_unknown", "missing_zero"];
+  const rows = view.rows
+    .filter((r) => (!onlyUpdate || r.needsUpdate) && (!onlyZero || zeroStatuses.includes(r.status)))
+    .sort((a, b) => (Number(b.needsUpdate) - Number(a.needsUpdate)) || (Number(zeroStatuses.includes(b.status)) - Number(zeroStatuses.includes(a.status))) || a.title.localeCompare(b.title, "ja"));
+  if (rows.length === 0) {
+    table.hidden = true;
+    return;
+  }
+  table.hidden = false;
+  table.innerHTML = `
+    <thead><tr><th>商品</th><th>在庫</th><th>状態</th><th>リセット日（根拠）</th><th>現行ロット数量</th><th>金額計</th><th>加重平均単価</th><th>プライスター現cost</th><th>差額</th><th></th></tr></thead>
+    <tbody>${rows.map((r) => {
+      const isZero = zeroStatuses.includes(r.status);
+      const stockText = r.inStockCsv ? String(r.stockTotal) : "-";
+      const resetText = r.resetDate
+        ? `${escapeHtml(r.resetDate)}<br><small>${escapeHtml(STOCK_SOURCE_LABELS[r.source] || "")}</small>`
+        : (r.status === "zero_unknown" ? "<small>未リセット（販売CSVを読み込むと判定します）</small>" : "-");
+      let avgText;
+      if (r.avg !== null) avgText = `<strong>${yen(r.avg)}</strong>`;
+      else if (isZero) avgText = `<small>新ロット仕入れ未記録</small>${r.referenceAvg !== null ? `<br><small style="color:#888">参考: ${yen(r.referenceAvg)}</small>` : ""}`;
+      else avgText = "-";
+      const costText = r.costs.length ? r.costs.map(yen).join(" / ") : "-";
+      const diffText = r.avg !== null && r.costs.length ? r.costs.map((c) => { const d = Math.round(r.avg) - c; return (d > 0 ? "+" : "") + d.toLocaleString("ja-JP") + "円"; }).join(" / ") : "-";
+      const open = stockOpenPreview.has(r.asin);
+      return `
+      <tr class="stock-row ${isZero ? "stock-zero" : ""}" data-asin="${escapeHtml(r.asin)}">
+        <td>${escapeHtml(r.title)}<br><small>${escapeHtml(r.asin)}</small></td>
+        <td>${stockText}</td>
+        <td>${STOCK_STATUS_LABELS[r.status]}</td>
+        <td>${resetText}</td>
+        <td>${r.lotQty}</td>
+        <td>${yen(r.lotAmount)}</td>
+        <td>${avgText}</td>
+        <td>${costText}</td>
+        <td class="${r.needsUpdate ? "stock-need-update" : ""}">${diffText}</td>
+        <td><button type="button" class="btn" data-action="toggle-stock-preview" data-asin="${escapeHtml(r.asin)}">内訳（${r.records.length}件）</button></td>
+      </tr>
+      <tr class="stock-preview-row" data-asin="${escapeHtml(r.asin)}" ${open ? "" : "hidden"}>
+        <td colspan="10">
+          <div style="margin-bottom:6px;">
+            リセット日を手動で指定:
+            <input type="date" data-role="manual-date" value="${escapeHtml(r.resetDate || "")}">
+            <button type="button" class="btn" data-action="apply-reset-date" data-asin="${escapeHtml(r.asin)}">この日付で適用</button>
+            <button type="button" class="btn" data-action="clear-reset-date" data-asin="${escapeHtml(r.asin)}">自動に戻す</button>
+            <small>（この日以降の仕入れが現行ロットになります）</small>
+          </div>
+          ${r.records.length === 0 ? `<p class="hint">この商品に紐付いた仕入れ記録はありません。</p>` : `
+          <table class="stock-preview-table">
+            <thead><tr><th>日付</th><th>数量</th><th>金額</th><th>区分</th><th>アカウント／注文番号</th></tr></thead>
+            <tbody>${r.records.map((rec) => `
+              <tr class="${rec.included ? "" : "is-excluded"}">
+                <td>${escapeHtml(rec.date)}</td><td>${rec.quantity}</td><td>${yen(rec.amount)}</td>
+                <td>${rec.included ? "現行ロット" : "旧ロット（除外）"}</td>
+                <td>${escapeHtml(rec.email || "")}${rec.orderNumber ? `<br><small>${escapeHtml(rec.orderNumber)}</small>` : ""}</td>
+              </tr>`).join("")}</tbody>
+          </table>`}
+        </td>
+      </tr>`;
+    }).join("")}</tbody>
+  `;
+}
+
+function bulkRegisterStockProducts() {
+  if (!stockState.stockRows) { $("stockStatus").textContent = "先に在庫CSVを読み込んでください。"; return; }
+  const master = getProductMaster();
+  const known = new Set();
+  master.forEach((e) => (e.asins || []).forEach((a) => known.add(a)));
+  let added = 0;
+  stockState.stockRows.forEach((r) => {
+    if (known.has(r.asin)) return;
+    known.add(r.asin);
+    master.push({ canonical: r.title, keyword: "", asins: [r.asin] });
+    added++;
+  });
+  saveProductMaster(master);
+  renderProductMaster();
+  $("stockStatus").textContent = `在庫CSVの商品 ${added}件を商品マスタに登録しました（登録済みの商品は除きます）。`;
+}
+
+function attachStockEvents() {
+  purgeOldSnapshots(localDateStr(new Date()));
+  $("stockAutoDelete").checked = isStockAutoDeleteOn();
+  if (!stockFolderSupported()) {
+    $("stockFolderBtn").hidden = true;
+    $("stockFolderPickBtn").hidden = true;
+    $("stockAutoDelete").closest("label").hidden = true;
+    $("stockDropZone").textContent = "このブラウザではフォルダ連携を使えません（PCのChrome・Edgeで使えます）。ここにCSVをドラッグ＆ドロップするか、上のボタンで選んでください。";
+  }
+  $("stockFolderBtn").addEventListener("click", () => loadStockFromFolder(false));
+  $("stockFolderPickBtn").addEventListener("click", () => loadStockFromFolder(true));
+  $("stockCsvInput").addEventListener("change", async (e) => {
+    const files = Array.from(e.target.files || []);
+    e.target.value = "";
+    if (files.length > 0) await ingestStockCsvFiles(files);
+  });
+  const drop = $("stockDropZone");
+  ["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("is-dragover"); }));
+  ["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.remove("is-dragover"); }));
+  drop.addEventListener("drop", async (e) => {
+    const files = Array.from((e.dataTransfer && e.dataTransfer.files) || []);
+    if (files.length > 0) await ingestStockCsvFiles(files);
+  });
+
+  $("stockAutoDelete").addEventListener("change", (e) => {
+    localStorage.setItem(STOCK_AUTODELETE_KEY, e.target.checked ? "on" : "off");
+    if (!e.target.checked) localStorage.removeItem(STOCK_AUTODELETE_CONFIRMED_KEY);
+  });
+  ["stockIncludePending", "stockMissingAsZero", "stockThreshold", "stockOnlyUpdate", "stockOnlyZero"].forEach((id) => {
+    $(id).addEventListener("change", () => renderStockView(false));
+  });
+  $("stockMasterBulkBtn").addEventListener("click", bulkRegisterStockProducts);
+
+  $("stockAmbiguous").addEventListener("click", (e) => {
+    const btn = e.target.closest('button[data-action="register-link"]');
+    if (!btn) return;
+    const row = btn.closest(".stock-ambiguous-row");
+    const asin = row.querySelector('select[data-role="link-select"]').value;
+    const product = stockView && stockView.rows.find((r) => r.asin === asin);
+    if (!product) return;
+    addProductMasterAsinEntry(product.title, stockKeywordFromName(btn.dataset.name), asin);
+    renderProductMaster();
+    renderStockView(false);
+  });
+
+  $("stockTable").addEventListener("click", (e) => {
+    const btn = e.target.closest("button[data-action]");
+    if (!btn) return;
+    const asin = btn.dataset.asin;
+    if (btn.dataset.action === "toggle-stock-preview") {
+      if (stockOpenPreview.has(asin)) stockOpenPreview.delete(asin); else stockOpenPreview.add(asin);
+      const row = document.querySelector(`#stockTable tr.stock-preview-row[data-asin="${CSS.escape(asin)}"]`);
+      if (row) row.hidden = !stockOpenPreview.has(asin);
+    } else if (btn.dataset.action === "apply-reset-date") {
+      const input = document.querySelector(`#stockTable tr.stock-preview-row[data-asin="${CSS.escape(asin)}"] input[data-role="manual-date"]`);
+      if (!input || !/^\d{4}-\d{2}-\d{2}$/.test(input.value)) { $("stockStatus").textContent = "リセット日は日付で指定してください。"; return; }
+      const dates = getResetDates();
+      dates[asin] = { resetDate: input.value, source: "manual", decidedAt: new Date().toISOString() };
+      saveResetDates(dates);
+      renderStockView(false);
+    } else if (btn.dataset.action === "clear-reset-date") {
+      const dates = getResetDates();
+      delete dates[asin];
+      saveResetDates(dates);
+      renderStockView(false);
+    }
+  });
+
+  $("stockClearDataBtn").addEventListener("click", async () => {
+    if (!window.confirm("在庫リセットのデータ（リセット日・在庫の履歴・専用フォルダの設定）をすべて消去します。仕入れ記録や商品マスタは消えません。よろしいですか？")) return;
+    [STOCK_RESET_DATES_KEY, STOCK_SNAPSHOTS_KEY, STOCK_AUTODELETE_CONFIRMED_KEY].forEach((k) => localStorage.removeItem(k));
+    stockDirHandle = null;
+    await stockIdbClear();
+    stockOpenPreview.clear();
+    $("stockStatus").textContent = "在庫リセットのデータを消去しました。";
+    if (stockState.stockRows) renderStockView(false);
+  });
+}
+
 function init() {
   fillSelect($("category"), CATEGORIES, "label");
   fillSelect($("fbaSizeTier"), FBA_TIERS, "label");
@@ -2350,6 +3077,7 @@ function init() {
   attachInputEvents();
   attachHistoryEvents();
   attachImportEvents();
+  attachStockEvents();
   renderHistory();
   recalcAndRender();
 

@@ -72,7 +72,8 @@ body {
   align-items: start;
 }
 @media (max-width: 880px) {
-  .layout { grid-template-columns: 1fr; }
+  /* minmax(0, 1fr): 幅広の表がカラム幅を押し広げず、.table-scroll内で横スクロールさせる */
+  .layout { grid-template-columns: minmax(0, 1fr); }
 }
 
 /* 期間集計は表が横に長いため、2カラムの外に出して画面幅いっぱいに表示する */
@@ -334,3 +335,29 @@ body {
   color: var(--text-muted);
   padding: 20px;
 }
+
+/* ---------- 在庫リセット判定 ---------- */
+.stock-actions { display: flex; flex-wrap: wrap; gap: 8px; margin: 12px 0 8px; align-items: center; }
+.stock-file-label { cursor: pointer; display: inline-flex; align-items: center; }
+.stock-drop { border: 2px dashed var(--border); border-radius: 8px; padding: 12px; text-align: center; font-size: 12.5px; color: var(--muted, #666); margin-bottom: 10px; }
+.stock-drop.is-dragover { border-color: var(--green, #2e7d32); background: var(--green-bg, #e8f5e9); }
+.stock-options { display: flex; flex-direction: column; gap: 6px; font-size: 13px; margin: 8px 0; }
+.stock-filters { display: flex; flex-wrap: wrap; gap: 12px; align-items: center; margin: 12px 0 6px; font-size: 13px; }
+#stockTable > tbody > tr.stock-zero > td { background: var(--green-bg, #e8f5e9); }
+#stockTable .stock-need-update { color: var(--red, #c62828); font-weight: 700; }
+.stock-preview-table { width: 100%; font-size: 12px; border-collapse: collapse; }
+.stock-preview-table th, .stock-preview-table td { padding: 4px 6px; border-bottom: 1px solid var(--border); text-align: left; }
+.stock-preview-table tr.is-excluded td { color: #888; text-decoration: line-through; }
+.stock-ambiguous-row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12.5px; }
+.stock-ambiguous-row select { max-width: 360px; }
+
+#stockTable { min-width: 1000px; }
+#stockTable th, #stockTable td { vertical-align: top; }
+#stockTable td:nth-child(2), #stockTable td:nth-child(5), #stockTable td:nth-child(6),
+#stockTable td:nth-child(7), #stockTable td:nth-child(8), #stockTable td:nth-child(9) { white-space: nowrap; }
+#stockTable td:nth-child(3), #stockTable td:nth-child(4) { min-width: 120px; }
+#stockTable td:nth-child(1) { min-width: 260px; }
+#stockTable tr.stock-preview-row > td { white-space: normal; }
+#stockTable th { white-space: nowrap; }
+#stockTable td:nth-child(10) .btn { white-space: nowrap; }
+#stockTable tr.stock-preview-row input[type="date"] { width: auto; }

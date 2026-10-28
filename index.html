@@ -369,6 +369,46 @@
       <p class="hint" id="deleteAllStatus"></p>
     </div>
   </div>
+
+  <!-- ============ 在庫リセット判定（プライスターのCSV） ============ -->
+  <div class="card panel--full" id="stockResetCard">
+    <h2>在庫リセット判定（プライスターCSV）</h2>
+    <p class="hint">プライスターの在庫CSV（<code>editUploadProduct_FBA.csv</code>）と販売CSV（<code>orders_○○.csv</code>、直近3か月分がおすすめ）を読み込み、在庫が0になった商品は「最後に売れた日」より後の仕入れだけで単価を計算し直します。在庫が残っている商品は、これまで通り継続して計算します。CSVはこのブラウザ内でのみ処理し、外部へは送信しません。プライスターへの単価登録はご自身で行ってください。</p>
+
+    <div class="stock-actions">
+      <button type="button" id="stockFolderBtn" class="btn btn--primary">フォルダを読み込む</button>
+      <button type="button" id="stockFolderPickBtn" class="btn">専用フォルダを選び直す</button>
+      <label class="btn stock-file-label">CSVを選んで読み込む
+        <input type="file" id="stockCsvInput" accept=".csv" multiple hidden>
+      </label>
+    </div>
+    <div id="stockDropZone" class="stock-drop">ここに在庫CSV・販売CSVをドラッグ＆ドロップしても読み込めます（文字コード・ファイルの種類は自動判定）</div>
+
+    <div class="stock-options">
+      <label><input type="checkbox" id="stockAutoDelete"> 90日を過ぎた古いCSVを専用フォルダから自動で削除する（各種類の最新1件は残します）</label>
+      <label><input type="checkbox" id="stockIncludePending" checked> 最終販売日に「保留中(Pending)」の注文を含める</label>
+      <label><input type="checkbox" id="stockMissingAsZero" checked> 販売CSVにあるが在庫CSVに無い商品（出品情報なし）は在庫ゼロ扱いにする</label>
+      <label>「要更新」とみなす差額（円以上）<input type="number" id="stockThreshold" value="1" min="0" step="1" style="width:80px"></label>
+    </div>
+    <p class="hint" id="stockStatus"></p>
+    <div id="stockSummary" class="hint"></div>
+    <div id="stockAmbiguous"></div>
+
+    <div class="stock-filters" id="stockFilters" hidden>
+      <label><input type="checkbox" id="stockOnlyUpdate"> 要更新のみ表示</label>
+      <label><input type="checkbox" id="stockOnlyZero"> 在庫0のみ表示</label>
+      <button type="button" id="stockMasterBulkBtn" class="btn">CSVの商品を商品マスタに一括登録</button>
+    </div>
+    <div class="table-scroll">
+      <table class="import-table" id="stockTable" hidden></table>
+    </div>
+
+    <details style="margin-top:14px;">
+      <summary style="cursor:pointer;">保存データの管理</summary>
+      <p class="hint">在庫の履歴は90日を過ぎると自動で削除されます。リセット日（ロットの起点）は商品ごとに残ります。</p>
+      <button type="button" id="stockClearDataBtn" class="btn btn--danger">在庫リセットのデータをすべて消去</button>
+    </details>
+  </div>
 </main>
 
 <footer class="app-footer">
