@@ -43,6 +43,7 @@ const SPREADSHEET_ID = "";
 
 const GMAIL_QUERY = "from:amazon.co.jp 発送"; // Webツールの初期値と同じ。必要に応じて書き換えてよい
 const MAX_MESSAGES_PER_RUN = 200; // 1回の実行での上限(実行時間・Gmail APIクォータの暴走防止)
+const MAX_BROKEN_ORDER_LOOKUPS = 20; // 商品名が壊れた行の注文番号を個別に検索する上限(1回の実行あたり)
 
 /* ============================================================
  * メイン処理
@@ -83,6 +84,22 @@ function autoFetchPurchaseRecords_() {
   try {
     const threads = GmailApp.search(GMAIL_QUERY, 0, MAX_MESSAGES_PER_RUN);
     const messages = [].concat.apply([], threads.map((t) => t.getMessages()));
+
+    // 商品名がHTMLの断片になってしまっている行は、検索範囲(最新の200件)より古いメールが原因の
+    // ことがあり、その場合は通常の検索では二度と直せない。壊れた行の注文番号を個別に検索して、
+    // 同じ流れで解析・修正できるようにする。
+    const seenMessageIds = {};
+    messages.forEach((m) => { seenMessageIds[m.getId()] = true; });
+    findBrokenRecordOrders_(existingRecords).slice(0, MAX_BROKEN_ORDER_LOOKUPS).forEach((orderNumber) => {
+      GmailApp.search("from:amazon.co.jp \"" + orderNumber + "\"", 0, 10).forEach((t) => {
+        t.getMessages().forEach((m) => {
+          if (seenMessageIds[m.getId()]) return;
+          seenMessageIds[m.getId()] = true;
+          messages.push(m);
+        });
+      });
+    });
+
     const parseResults = [];
 
     messages.forEach((message) => {
@@ -102,6 +119,7 @@ function autoFetchPurchaseRecords_() {
     const picked = pickBestAutoCandidates_(parseResults);
     const rowsToAppend = [];
     const claimedRows = {};
+    const ambiguousOrders = {};
     let backfilledCount = 0;
     Object.keys(picked.byKey).forEach((key) => {
       if (savedOrderKeys.has(key)) return;
@@ -109,7 +127,7 @@ function autoFetchPurchaseRecords_() {
       // 以前の保存分はASINが空で名前が途中で切れていることがあり、キーが一致しない。
       // 同じ注文の同じ商品が保存済みなら、二重に保存せず足りない情報だけを補う。
       const match = findMatchingRecord_(existingRecords, cand.parsed.orderNumber, cand.item, claimedRows, calcRecordAmount_(cand.item, cand.parsed));
-      if (match.ambiguous) return;
+      if (match.ambiguous) { ambiguousOrders[cand.parsed.orderNumber] = true; return; }
       if (match.record) {
         claimedRows[match.record.rowNumber] = true;
         const fields = buildRecordBackfill_(match.record, cand.item);
@@ -131,8 +149,11 @@ function autoFetchPurchaseRecords_() {
     appendRows_(sheet, rowsToAppend);
 
     // キャンセルメールが見つかった注文番号について、過去の実行で既に
-    // 保存されてしまっている記録があれば、まとめて削除する。
-    removeCancelledRows_(sheet, existingRecords, picked.cancelledOrderNumbers);
+    // 保存されてしまっている記録があれば、まとめて削除する。あわせて、直せなかった
+    // 壊れた行(下記findOrphanBrokenRecords_参照)も同じ削除処理で消す(行番号のずれを防ぐため)。
+    const orphanRecords = findOrphanBrokenRecords_(existingRecords, picked, claimedRows, ambiguousOrders);
+    removeCancelledRows_(sheet, existingRecords, picked.cancelledOrderNumbers, orphanRecords);
+    if (orphanRecords.length > 0) Logger.log("商品名が壊れていて対応する商品が無い記録" + orphanRecords.length + "件を削除しました。");
   } catch (e) {
     errorCount++;
     Logger.log("自動取得エラー: " + e.message);
@@ -195,14 +216,18 @@ function pickBestAutoCandidates_(results) {
 
   results.forEach((r) => {
     if (r.skipped || !r.parsed) return;
-    if (r.parsed.orderNumber && cancelledOrderNumbers[r.parsed.orderNumber]) return;
     const priority = r.classification === "safe" ? 1 : 2; // neutral(注文確認)を優先
     r.parsed.items.forEach((item) => {
-      if (!r.parsed.orderNumber) { noKeyRows.push({ item: item, parsed: r.parsed, dateStr: r.dateStr }); return; }
-      const key = r.parsed.orderNumber + "|" + (item.asin || item.name);
+      // 1通のメールに複数の注文のカードが載っていることがあるため、注文番号・注文合計は
+      // メール単位ではなく商品ごとに持つ(parseAmazonOrderEmail_のコメント参照)。
+      const orderNumber = item.orderNumber || r.parsed.orderNumber;
+      if (orderNumber && cancelledOrderNumbers[orderNumber]) return;
+      const orderParsed = { orderNumber: orderNumber, orderTotal: item.orderTotal !== undefined ? item.orderTotal : r.parsed.orderTotal };
+      if (!orderNumber) { noKeyRows.push({ item: item, parsed: orderParsed, dateStr: r.dateStr }); return; }
+      const key = orderNumber + "|" + (item.asin || item.name);
       const existing = bestByKey[key];
       if (!existing || priority > existing.priority) {
-        bestByKey[key] = { item: item, parsed: r.parsed, dateStr: r.dateStr, priority: priority };
+        bestByKey[key] = { item: item, parsed: orderParsed, dateStr: r.dateStr, priority: priority };
       }
     });
   });
@@ -343,12 +368,40 @@ function readExistingRecords_(sheet) {
 }
 
 /**
- * キャンセル等が判明した注文番号について、既にシートに保存済みの行が
- * あれば削除する。行番号が大きい方から先に削除しないと、削除のたびに
- * 後続行の番号がずれて別の行を消してしまうため、降順に処理する。
+ * 商品名がHTMLの断片になっている行の注文番号(重複なし)。
  */
-function removeCancelledRows_(sheet, existingRecords, cancelledOrderNumbers) {
+function findBrokenRecordOrders_(existingRecords) {
+  const orders = [];
+  existingRecords.forEach((r) => {
+    if (r.orderNumber && isHtmlFragment_(r.name) && orders.indexOf(r.orderNumber) < 0) orders.push(r.orderNumber);
+  });
+  return orders;
+}
+
+/**
+ * 商品名がHTMLの断片になっている行のうち、今回その注文のメールを解析できたのに、どの商品とも
+ * 対応づかなかったもの。1通に複数の注文が載るメールで、別の注文の「合計」の金額を商品と
+ * 誤認して保存された行などで、正しい行は別に存在する(または今回保存される)ため不要。
+ * 照合が曖昧だった注文(ambiguousOrders)の行は、どちらが正しいか決められないので対象にしない。
+ */
+function findOrphanBrokenRecords_(existingRecords, picked, claimedRows, ambiguousOrders) {
+  const seenOrders = {};
+  Object.keys(picked.byKey).forEach((key) => { seenOrders[picked.byKey[key].parsed.orderNumber] = true; });
+  return existingRecords.filter((r) => r.orderNumber && isHtmlFragment_(r.name)
+    && seenOrders[r.orderNumber] && !ambiguousOrders[r.orderNumber] && !claimedRows[r.rowNumber]);
+}
+
+/**
+ * キャンセル等が判明した注文番号について、既にシートに保存済みの行が
+ * あれば削除する(extraRecordsに渡した行も一緒に削除する)。行番号が大きい方から
+ * 先に削除しないと、削除のたびに後続行の番号がずれて別の行を消してしまうため、
+ * 降順に処理する。
+ */
+function removeCancelledRows_(sheet, existingRecords, cancelledOrderNumbers, extraRecords) {
   const toRemove = existingRecords.filter((r) => r.orderNumber && cancelledOrderNumbers[r.orderNumber]);
+  (extraRecords || []).forEach((r) => {
+    if (!toRemove.some((x) => x.rowNumber === r.rowNumber)) toRemove.push(r);
+  });
   toRemove.sort((a, b) => b.rowNumber - a.rowNumber);
   toRemove.forEach((r) => sheet.deleteRow(r.rowNumber));
   return toRemove.length;
@@ -495,6 +548,9 @@ function extendTruncatedName_(name, asin, altByAsin) {
   return unique.length === 1 ? unique[0] : name;
 }
 
+// 商品名を特定できなかった商品に付ける仮の名前。
+const UNKNOWN_ITEM_NAME_ = "(商品名を確認してください)";
+
 function parseAmazonOrderEmail_(rawInput) {
   // moduleId-marketingSlotは実際の注文確認メールで確認された広告枠
   // (「${hash-get display-group}のおすすめセール」等、見出し文言は一定しない)
@@ -525,53 +581,52 @@ function parseAmazonOrderEmail_(rawInput) {
 
   const consumed = {};
 
-  function findLabeledAmount(inlineRe, labelOnlyRe) {
+  // ラベル(「注文番号」「合計」等)に対応する値を、メール内の全ての出現箇所から集める。
+  // 1通のメールに複数の注文のカードが並ぶことがあり、最初の1件だけを拾うと、2件目以降の
+  // 「合計」の金額が商品の価格として誤って拾われ、存在しない商品が増えてしまう。
+  // ラベルと値が別セル=別行に分かれる場合は、同一行での一致の代わりに「ラベルのみの行」の
+  // 直後(lookahead行以内)から値を拾う。消費された行は items の価格候補から除外する。
+  function findAllLabeled(inlineRe, labelOnlyRe, valueRe, lookahead, fromInline, fromNext) {
+    const marks = [];
     for (let i = 0; i < lines.length; i++) {
       const m = lines[i].match(inlineRe);
-      if (m) { consumed[i] = true; return toNum(m[m.length - 1]); }
-    }
-    for (let i = 0; i < lines.length; i++) {
-      if (labelOnlyRe.test(lines[i])) {
-        for (let d = 1; d <= 2; d++) {
-          const next = lines[i + d];
-          if (next && priceRe.test(next)) {
-            consumed[i] = true;
-            consumed[i + d] = true;
-            return toNum(next.match(priceRe)[1]);
-          }
-        }
+      if (m) {
+        consumed[i] = true;
+        marks.push({ i: i, value: fromInline(m) });
+        continue;
       }
-    }
-    return null;
-  }
-
-  function findLabeledText(inlineRe, labelOnlyRe, valueRe) {
-    for (let i = 0; i < lines.length; i++) {
-      const m = lines[i].match(inlineRe);
-      if (m) { consumed[i] = true; return m[1]; }
-    }
-    for (let i = 0; i < lines.length; i++) {
-      if (labelOnlyRe.test(lines[i])) {
-        const next = lines[i + 1];
+      if (!labelOnlyRe.test(lines[i])) continue;
+      for (let d = 1; d <= lookahead; d++) {
+        const next = lines[i + d];
         if (next && valueRe.test(next)) {
           consumed[i] = true;
-          consumed[i + 1] = true;
-          return next;
+          consumed[i + d] = true;
+          marks.push({ i: i, value: fromNext(next) });
+          break;
         }
       }
     }
-    return null;
+    return marks;
   }
 
-  const orderNumber = findLabeledText(
+  const orderMarks = findAllLabeled(
     /注文番号[:：]?\s*([0-9A-Za-z-]{8,})/,
     /^注文番号[:：]?\s*$/,
-    /^[0-9A-Za-z-]{8,}$/
+    /^[0-9A-Za-z-]{8,}$/,
+    1,
+    (m) => m[1],
+    (next) => next
   );
-  const orderTotal = findLabeledAmount(
+  const totalMarks = findAllLabeled(
     /(注文合計|ご請求金額|お支払い金額|合計)[:：]?\s*[¥￥]\s?([\d,]{2,})/,
-    /^(注文合計|ご請求金額|お支払い金額|合計)[:：]?$/
+    /^(注文合計|ご請求金額|お支払い金額|合計)[:：]?$/,
+    priceRe,
+    2,
+    (m) => toNum(m[m.length - 1]),
+    (next) => toNum(next.match(priceRe)[1])
   );
+  const orderNumber = orderMarks.length > 0 ? orderMarks[0].value : null;
+  const orderTotal = totalMarks.length > 0 ? totalMarks[0].value : null;
 
   const priceLineIdx = [];
   const qtyLineIdx = [];
@@ -608,13 +663,34 @@ function parseAmazonOrderEmail_(rawInput) {
     return bestDist <= 4 ? best : 1;
   };
 
-  const items = priceLineIdx.map(({ i, price }) => ({
-    name: findNearbyLabel(i) || "(商品名を確認してください)",
-    price: price,
-    quantity: findNearbyQty(i),
-    isUnitPrice: false,
-    asin: "",
-  }));
+  // 商品が属する注文は、その商品より前で最も近い注文番号の行で決まる(カード単位のレイアウト)。
+  // 注文合計は、その注文のカードの後ろ、次の別の注文が始まるまでの間にある最初の合計。
+  const distinctOrderNumbers = Array.from(new Set(orderMarks.map((m) => m.value)));
+  const orderMarkFor = (idx) => {
+    let hit = null;
+    orderMarks.forEach((m) => { if (m.i < idx) hit = m; });
+    return hit || orderMarks[0] || null;
+  };
+  const orderTotalFor = (idx, order) => {
+    if (!order || distinctOrderNumbers.length <= 1) return orderTotal;
+    const nextOther = orderMarks.find((m) => m.i > idx && m.value !== order.value);
+    const limit = nextOther ? nextOther.i : Infinity;
+    const hit = totalMarks.find((t) => t.i > idx && t.i < limit);
+    return hit ? hit.value : null;
+  };
+
+  const items = priceLineIdx.map(({ i, price }) => {
+    const order = orderMarkFor(i);
+    return {
+      name: findNearbyLabel(i) || UNKNOWN_ITEM_NAME_,
+      price: price,
+      quantity: findNearbyQty(i),
+      isUnitPrice: false,
+      asin: "",
+      orderNumber: order ? order.value : null,
+      orderTotal: orderTotalFor(i, order),
+    };
+  });
 
   const asins = extractAsinsInOrder_(scopedInput);
   if (asins.length === items.length) {
@@ -642,18 +718,40 @@ function parseAmazonOrderEmail_(rawInput) {
     item.name = extendTruncatedName_(item.name, item.asin, linkData.altByAsin);
   });
 
+  // 同じ注文の同じ商品が、配送日の違い等で複数のカードに分かれて載っていることがある。
+  // 保存の重複判定キーが「注文番号+ASIN(無ければ商品名)」なので、1件にまとめて
+  // 数量と金額を合算する(まとめないと2枚目以降のカードが捨てられ、数量が不足する)。
+  const groups = [];
+  const groupByKey = {};
+  items.forEach((item) => {
+    const mergeable = item.orderNumber && (item.asin || item.name !== UNKNOWN_ITEM_NAME_);
+    const key = mergeable ? item.orderNumber + "|" + (item.asin || item.name) : null;
+    if (key !== null && groupByKey[key]) { groupByKey[key].push(item); return; }
+    const group = [item];
+    groups.push(group);
+    if (key !== null) groupByKey[key] = group;
+  });
+  const mergedItems = groups.map((cards) => {
+    if (cards.length === 1) return cards[0];
+    const amount = cards.reduce((sum, c) => sum + (inferIsUnitPrice_(c, c.orderTotal) ? c.price * c.quantity : c.price), 0);
+    const quantity = cards.reduce((sum, c) => sum + c.quantity, 0);
+    return Object.assign({}, cards[0], { price: amount, quantity: quantity, isUnitPrice: false });
+  });
+
   // 単一商品の注文で、商品欄のカタログ価格と実際の請求合計が大きく異なる場合
   // (Amazonポイントを支払いに充当した注文等)、実際に支払った金額である合計を
-  // 優先する。
-  if (items.length === 1 && orderTotal !== null) {
-    const item = items[0];
-    if (Math.abs(item.price * item.quantity - orderTotal) > 1) {
-      item.price = orderTotal;
+  // 優先する。注文ごとに判定する(1通のメールに複数の注文が載っていることがあるため)。
+  mergedItems.forEach((item) => {
+    if (item.orderTotal === null) return;
+    const sameOrderCount = mergedItems.filter((o) => (o.orderNumber || "") === (item.orderNumber || "")).length;
+    if (sameOrderCount !== 1) return;
+    if (Math.abs(item.price * item.quantity - item.orderTotal) > 1) {
+      item.price = item.orderTotal;
       item.isUnitPrice = false;
     }
-  }
+  });
 
-  return { orderNumber: orderNumber, orderTotal: orderTotal, items: items };
+  return { orderNumber: orderNumber, orderTotal: orderTotal, items: mergedItems };
 }
 
 function inferIsUnitPrice_(item, orderTotal) {
