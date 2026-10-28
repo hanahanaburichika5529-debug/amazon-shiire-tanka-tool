@@ -583,7 +583,13 @@ function parseAmazonOrderEmail(rawInput) {
   // で、見出し文言ではなくHTML側のモジュール名で切り詰める方が確実。
   const recommendationCutoffRe = /もう一度買う|おすすめ商品|よく一緒に購入されている商品|この商品を買った人はこんな商品も買っています|moduleId-marketingSlot/;
   const cutoffMatch = rawInput.match(recommendationCutoffRe);
-  const scopedInput = cutoffMatch ? rawInput.slice(0, cutoffMatch.index) : rawInput;
+  // 目印(moduleId-marketingSlot等)は、古いメールソフト向けの条件付きコメント内のタグ
+  // (<table ... class="...moduleId-marketingSlot-outlook">)の属性にも現れる。その途中で切ると
+  // 閉じていないタグの断片が文字として残り、商品名に混ざってしまうため、タグの先頭まで戻す。
+  let cutIndex = cutoffMatch ? cutoffMatch.index : rawInput.length;
+  const lastLt = rawInput.lastIndexOf("<", cutIndex);
+  if (lastLt >= 0 && rawInput.indexOf(">", lastLt) >= cutIndex) cutIndex = lastLt;
+  const scopedInput = rawInput.slice(0, cutIndex);
 
   const looksHtml = /<[a-z][\s\S]*>/i.test(scopedInput);
   let text = looksHtml ? stripHtml(scopedInput) : scopedInput;
@@ -683,7 +689,7 @@ function parseAmazonOrderEmail(rawInput) {
 
   // 商品名は価格より前の行にあるのが基本形（名前→数量→価格の順）なので、
   // 後続行より先に手前側を探す。後続行を同格に探すと次の商品名を誤って拾う。
-  const isPlausibleName = (l) => l && l.length >= 3 && !priceRe.test(l) && !qtyRe.test(l) && !nonNameRe.test(l) && !dividerRe.test(l) && !numericOnlyRe.test(l);
+  const isPlausibleName = (l) => l && l.length >= 3 && !priceRe.test(l) && !qtyRe.test(l) && !nonNameRe.test(l) && !dividerRe.test(l) && !numericOnlyRe.test(l) && !isHtmlFragment(l);
   const findNearbyLabel = (idx) => {
     for (let d = 1; d <= 4; d++) {
       const before = lines[idx - d];
@@ -1511,6 +1517,11 @@ function calcRecordAmount(item, parsed) {
  * メール由来の名前は途中で「...」「…」と省略されていることがあるため、省略記号を
  * 除いた先頭部分どうしの前方一致で同じ商品かを判定する。
  */
+/** HTMLタグの断片(「<table align=...」等)が商品名として保存されてしまったかどうか。 */
+function isHtmlFragment(s) {
+  return /<\/?[a-zA-Z!]/.test(String(s || ""));
+}
+
 function normalizeNameForMatch(name) {
   return String(name || "").normalize("NFKC").replace(/\s+/g, " ").trim().replace(/\.{2,}$/, "").trim().toLowerCase();
 }
@@ -1538,7 +1549,13 @@ function isSameOrderItem(rec, orderNumber, item) {
  */
 function findMatchingRecord(records, orderNumber, item, claimedRows, amount) {
   if (!orderNumber) return { record: null, ambiguous: false };
-  const matches = records.filter((r) => !claimedRows.has(r.rowNumber) && isSameOrderItem(r, orderNumber, item));
+  let matches = records.filter((r) => !claimedRows.has(r.rowNumber) && isSameOrderItem(r, orderNumber, item));
+  if (matches.length === 0) {
+    // 商品名がHTMLの断片になってしまった既存の行は、名前では照合できないため、
+    // 同じ注文で数量・金額が一致するものを同じ商品とみなして正しい名前に直す。
+    matches = records.filter((r) => !claimedRows.has(r.rowNumber) && r.orderNumber === orderNumber && isHtmlFragment(r.name)
+      && r.quantity === item.quantity && Math.abs(r.amount - amount) < 1);
+  }
   if (matches.length <= 1) return { record: matches[0] || null, ambiguous: false };
   const narrowed = matches.filter((r) => r.quantity === item.quantity && Math.abs(r.amount - amount) < 1);
   if (narrowed.length === 1) return { record: narrowed[0], ambiguous: false };
@@ -1552,7 +1569,9 @@ function findMatchingRecord(records, orderNumber, item, claimedRows, amount) {
 function buildRecordBackfill(rec, item) {
   const asin = rec.asin || item.asin || "";
   let name = rec.name;
-  if (/(\.{2,}|…)\s*$/.test(rec.name) && item.name.length > rec.name.length) {
+  if (isHtmlFragment(rec.name) && !isHtmlFragment(item.name)) {
+    name = item.name;
+  } else if (/(\.{2,}|…)\s*$/.test(rec.name) && item.name.length > rec.name.length) {
     const a = normalizeNameForMatch(rec.name);
     if (a && normalizeNameForMatch(item.name).indexOf(a) === 0) name = item.name;
   }
